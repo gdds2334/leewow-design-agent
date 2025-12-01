@@ -63,7 +63,7 @@ export default function Home() {
         img.src = event.target?.result as string;
         img.onload = () => {
           const canvas = document.createElement("canvas");
-          const MAX_WIDTH = 1024;
+          const MAX_WIDTH = 800; // Reduced from 1024 to speed up upload/processing
           const scaleSize = MAX_WIDTH / img.width;
           canvas.width = MAX_WIDTH;
           canvas.height = img.height * scaleSize;
@@ -167,9 +167,11 @@ export default function Home() {
             setProgress(percentage);
         };
 
-        await Promise.all(products.map(async (productConfig, idx) => {
+        // Sequential execution to avoid Vercel timeouts on free tier
+        for (let i = 0; i < products.length; i++) {
+            const productConfig = products[i];
+            const idx = i;
             const productName = productConfig.name;
-            const inspirationImage = null; // inspirationImage feature removed
 
             // Update individual item state helper
             const updateItemState = (update: Partial<GenerationResult>) => {
@@ -219,7 +221,7 @@ export default function Home() {
                 clearInterval(analysisTimer);
                 console.error(`Analysis error for ${productName}:`, err);
                 updateItemState({ error: "Analysis Failed", loading: false, statusText: "Failed" });
-                return; // Stop this product flow
+                continue; // Skip to next product on error
             }
             
             updateGlobalProgress();
@@ -262,7 +264,7 @@ export default function Home() {
             }
 
             updateGlobalProgress();
-        }));
+        }
 
       setStatus("done");
       setProgressMessage("设计完成！");

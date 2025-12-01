@@ -64,10 +64,10 @@ export async function POST(req: Request) {
       }
     `;
 
-    console.log(`[Analyze] Starting analysis for product: ${targetProduct} with model: gemini-2.5-pro-thinking`);
+    console.log(`[Analyze] Starting analysis for product: ${targetProduct} with model: gemini-2.5-flash-preview-09-2025`);
 
     const response = await client.chat.completions.create({
-      model: "gemini-2.5-pro-thinking", 
+      model: "gemini-2.5-flash-preview-09-2025", 
       messages: [
         {
           role: "user",
