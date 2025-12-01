@@ -177,6 +177,7 @@ type GenerationResult = {
   statusText?: string;
   pattern_description?: string;
   scene_description?: string;
+  fileIndex: number; // Added fileIndex for per-subject numbering
 };
 
 export default function Home() {
@@ -384,6 +385,7 @@ export default function Home() {
         const initialResults: GenerationResult[] = [];
 
         images.forEach(img => {
+            let subjectFileIndex = 0; // Reset index for each subject
             enabledProducts.forEach(prod => {
                 tasks.push({
                     taskId: `${img.id}-${prod.id}`,
@@ -398,9 +400,11 @@ export default function Home() {
                     pattern_description: "",
                     scene_description: "",
                     loading: true,
-                    statusText: "Waiting..."
+                    statusText: "Waiting...",
+                    fileIndex: subjectFileIndex // Store 0-based index
                 });
                 resultIndex++;
+                subjectFileIndex++;
             });
         });
 
@@ -588,12 +592,19 @@ export default function Home() {
           const result = validResults[i];
           if (result.imageUrl) {
               // Structure: MainFolder / SubjectName / Product_Index.jpg
-              // Sanitize folder names
-              const safeSubjectName = result.subjectName.replace(/[^a-z0-9]/gi, '_').substring(0, 20);
+              // Sanitize folder names, allowing unicode characters but removing dangerous filesystem chars
+              let safeSubjectName = result.subjectName.replace(/[\\/:*?"<>|]/g, '_').trim();
+              if (!safeSubjectName || safeSubjectName === '.' || safeSubjectName === '..') {
+                  safeSubjectName = `Subject_${i}`;
+              }
+              
               const subjectFolder = mainFolder.folder(safeSubjectName);
               
               if (subjectFolder) {
-                  const filename = `${result.product.replace(/[^a-z0-9]/gi, '_')}_${i.toString().padStart(3, '0')}.jpg`;
+                  // Use result.fileIndex for naming
+                  const filename = `${getFormattedName(result.fileIndex)}.jpg`; // Simplified name: just 0002.jpg
+                  // If you want product name included: `${result.product}_${getFormattedName(result.fileIndex)}.jpg`
+                  // But user request says: "corresponding 002 named images"
                   
                   try {
                       let data: Blob | string = "";
@@ -932,7 +943,7 @@ export default function Home() {
                                         />
                                         {/* Name Tag */}
                                         <div className="absolute top-6 left-6 bg-white/90 dark:bg-black/80 backdrop-blur-md text-neutral-900 dark:text-white px-4 py-1.5 rounded-full text-sm font-mono font-medium shadow-lg">
-                                            {getFormattedName(idx)}
+                                            {getFormattedName(result.fileIndex)}
                                         </div>
                                         <div className="absolute top-6 right-6 bg-violet-500/90 backdrop-blur-md text-white px-3 py-1 rounded-full text-xs font-medium shadow-lg">
                                             {result.subjectName}
@@ -954,10 +965,10 @@ export default function Home() {
                                         <p className="text-xs text-neutral-400 mt-1">Subject: {result.subjectName}</p>
                                     </div>
                                     <div className="flex items-center gap-3">
-                                        <span className="text-xs font-mono text-neutral-400 bg-neutral-100 dark:bg-neutral-700 px-2 py-1 rounded-md">{getFormattedName(idx)}</span>
+                                        <span className="text-xs font-mono text-neutral-400 bg-neutral-100 dark:bg-neutral-700 px-2 py-1 rounded-md">{getFormattedName(result.fileIndex)}</span>
                                         {result.imageUrl && (
                                             <button 
-                                                onClick={() => handleDownload(result.imageUrl!, `${result.subjectName}_${result.product}_${getFormattedName(idx)}.jpg`)}
+                                                onClick={() => handleDownload(result.imageUrl!, `${result.subjectName}_${result.product}_${getFormattedName(result.fileIndex)}.jpg`)}
                                                 className="text-violet-600 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300 transition-colors p-1"
                                                 title="Download Image"
                                             >
