@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Upload, Image as ImageIcon, Loader2, X, Plus, Settings, Lightbulb, Download, ZoomIn, Package } from "lucide-react";
+import { Upload, Image as ImageIcon, Loader2, X, Plus, Settings, Lightbulb, Download, ZoomIn, Package, ToggleLeft, ToggleRight } from "lucide-react";
 import clsx from "clsx";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
@@ -148,15 +148,16 @@ const generateImage = async (image: string, product: string, pattern_desc: strin
 
 // Default products
 const DEFAULT_PRODUCTS = [
-  { id: "1", name: "Black Hoodie", /* inspirationImage: null */ },
-  { id: "2", name: "Phone Case", /* inspirationImage: null */ },
-  { id: "3", name: "Mug", /* inspirationImage: null */ },
-  { id: "4", name: "Pillow", /* inspirationImage: null */ }
+  { id: "1", name: "Black Hoodie", enabled: true /* inspirationImage: null */ },
+  { id: "2", name: "Phone Case", enabled: true /* inspirationImage: null */ },
+  { id: "3", name: "Mug", enabled: true /* inspirationImage: null */ },
+  { id: "4", name: "Pillow", enabled: true /* inspirationImage: null */ }
 ];
 
 type ProductItem = {
   id: string;
   name: string;
+  enabled: boolean;
   // inspirationImage: string | null;
 };
 
@@ -167,6 +168,8 @@ type GenerationResult = {
   loading: boolean;
   error?: string;
   statusText?: string; // Added statusText for individual countdowns
+  pattern_description?: string;
+  scene_description?: string;
 };
 
 export default function Home() {
@@ -180,8 +183,51 @@ export default function Home() {
   const [progress, setProgress] = useState<number>(0);
   const [results, setResults] = useState<GenerationResult[]>([]);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [isLoaded, setIsLoaded] = useState(false); // New state to track if initial load is done
   const fileInputRef = useRef<HTMLInputElement>(null);
   const refFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Load products and design theme from localStorage on mount
+  useEffect(() => {
+      // Load products
+      const savedProducts = localStorage.getItem("leewow_product_config");
+      if (savedProducts) {
+          try {
+              const parsed = JSON.parse(savedProducts);
+              // Ensure compatibility if structure changes (e.g. adding enabled field to old configs)
+              const migrated = parsed.map((p: any) => ({
+                  ...p,
+                  enabled: p.enabled !== undefined ? p.enabled : true
+              }));
+              setProducts(migrated);
+          } catch (e) {
+              console.error("Failed to load products from localStorage", e);
+          }
+      }
+
+      // Load design theme
+      const savedTheme = localStorage.getItem("leewow_design_theme");
+      if (savedTheme) {
+          setDesignTheme(savedTheme);
+      }
+
+      setIsLoaded(true); // Mark initialization as complete
+  }, []);
+
+  // Save products to localStorage whenever they change
+  useEffect(() => {
+      if (isLoaded) {
+          localStorage.setItem("leewow_product_config", JSON.stringify(products));
+      }
+  }, [products, isLoaded]);
+
+  // Save design theme to localStorage whenever it changes
+  useEffect(() => {
+      if (isLoaded) {
+          localStorage.setItem("leewow_design_theme", designTheme);
+      }
+  }, [designTheme, isLoaded]);
+
     // Handle ESC key to close modal
     useEffect(() => {
         const handleEsc = (e: KeyboardEvent) => {
@@ -237,6 +283,7 @@ export default function Home() {
       setProducts([...products, { 
           id: Date.now().toString(), 
           name: "New Product", 
+          enabled: true
           // inspirationImage: null 
       }]);
     }
@@ -245,6 +292,12 @@ export default function Home() {
   const updateProductName = (index: number, value: string) => {
     const newProducts = [...products];
     newProducts[index] = { ...newProducts[index], name: value };
+    setProducts(newProducts);
+  };
+
+  const toggleProduct = (index: number) => {
+    const newProducts = [...products];
+    newProducts[index] = { ...newProducts[index], enabled: !newProducts[index].enabled };
     setProducts(newProducts);
   };
 
@@ -274,6 +327,12 @@ export default function Home() {
     const handleGenerate = async () => {
         if (!image) return;
 
+        const enabledProducts = products.filter(p => p.enabled);
+        if (enabledProducts.length === 0) {
+            alert("请至少启用一个商品配置");
+            return;
+        }
+
         // Scroll to results section
         setTimeout(() => {
             resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -285,7 +344,7 @@ export default function Home() {
     setProgress(5);
     
     // Initialize results with waiting state
-    const initialResults = products.map(p => ({
+    const initialResults = enabledProducts.map(p => ({
         product: p.name,
         prompt: "Waiting to start...",
         pattern_description: "",
@@ -297,7 +356,7 @@ export default function Home() {
 
     // Enhanced Parallel Generation
     try {
-        const totalSteps = products.length * 2; // 2 steps per product (Analyze, Generate)
+        const totalSteps = enabledProducts.length * 2; // 2 steps per product (Analyze, Generate)
         let completedSteps = 0;
 
         const updateGlobalProgress = () => {
@@ -307,7 +366,7 @@ export default function Home() {
         };
 
         // PARALLEL execution (Frontend direct call)
-        await Promise.all(products.map(async (productConfig, idx) => {
+        await Promise.all(enabledProducts.map(async (productConfig, idx) => {
             const productName = productConfig.name;
 
             // Update individual item state helper
@@ -382,8 +441,8 @@ export default function Home() {
                 
                 updateItemState({
                     loading: false,
-                    imageUrl: genData.result || null,
-                    error: null,
+                    imageUrl: genData.result || undefined,
+                    error: undefined,
                     statusText: "Done"
                 });
             } catch (error: any) {
@@ -476,6 +535,14 @@ export default function Home() {
           alert("打包下载失败，请重试");
       }
   };
+
+  if (!isLoaded) {
+      return (
+          <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 flex items-center justify-center">
+              <Loader2 className="w-10 h-10 text-violet-500 animate-spin" />
+          </div>
+      );
+  }
 
   return (
     <main className="min-h-screen bg-neutral-50 dark:bg-neutral-900 p-8 font-sans transition-colors duration-300">
@@ -594,14 +661,31 @@ export default function Home() {
                             </h3>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 {products.map((prod, idx) => (
-                                    <div key={prod.id} className="bg-neutral-50 dark:bg-neutral-700/30 p-4 rounded-xl border border-neutral-200 dark:border-neutral-600 hover:border-violet-300 dark:hover:border-violet-500/50 transition-colors group relative">
+                                    <div key={prod.id} className={clsx(
+                                        "bg-neutral-50 dark:bg-neutral-700/30 p-4 rounded-xl border border-neutral-200 dark:border-neutral-600 transition-all group relative",
+                                        prod.enabled ? "hover:border-violet-300 dark:hover:border-violet-500/50" : "opacity-60"
+                                    )}>
                                         <div className="flex items-center gap-3">
+                                            <button
+                                                onClick={() => toggleProduct(idx)}
+                                                className={clsx(
+                                                    "transition-colors focus:outline-none",
+                                                    prod.enabled ? "text-violet-500 hover:text-violet-600" : "text-neutral-400 hover:text-neutral-500"
+                                                )}
+                                                title={prod.enabled ? "禁用商品" : "启用商品"}
+                                            >
+                                                {prod.enabled ? <ToggleRight className="w-6 h-6" /> : <ToggleLeft className="w-6 h-6" />}
+                                            </button>
                                             <span className="text-sm font-medium text-neutral-500 whitespace-nowrap">品名:</span>
                                             <input
                                                 type="text"
                                                 value={prod.name}
                                                 onChange={(e) => updateProductName(idx, e.target.value)}
-                                                className="bg-white dark:bg-neutral-800 rounded-lg px-3 py-2 text-sm border border-neutral-200 dark:border-neutral-600 focus:border-violet-500 outline-none w-full transition-all text-neutral-700 dark:text-neutral-200"
+                                                disabled={!prod.enabled}
+                                                className={clsx(
+                                                    "bg-white dark:bg-neutral-800 rounded-lg px-3 py-2 text-sm border border-neutral-200 dark:border-neutral-600 focus:border-violet-500 outline-none w-full transition-all text-neutral-700 dark:text-neutral-200",
+                                                    !prod.enabled && "bg-neutral-100 dark:bg-neutral-900 text-neutral-400"
+                                                )}
                                                 placeholder="例如：手机壳"
                                             />
                                         </div>
