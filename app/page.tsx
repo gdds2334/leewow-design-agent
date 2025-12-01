@@ -161,31 +161,45 @@ type ProductItem = {
   // inspirationImage: string | null;
 };
 
+type SubjectImage = {
+  id: string;
+  url: string;
+  name: string;
+};
+
 type GenerationResult = {
+  subjectName: string;
   product: string;
   prompt: string;
   imageUrl?: string;
   loading: boolean;
   error?: string;
-  statusText?: string; // Added statusText for individual countdowns
+  statusText?: string;
   pattern_description?: string;
   scene_description?: string;
 };
 
 export default function Home() {
-  const [image, setImage] = useState<string | null>(null);
-  const [designTheme, setDesignTheme] = useState<string>(""); // New state for design theme
-  // const [referenceImage, setReferenceImage] = useState<string | null>(null);
-  // const [stylePrompt, setStylePrompt] = useState<string>("");
+  const [images, setImages] = useState<SubjectImage[]>([]); // Changed from single image to array
+  const [designTheme, setDesignTheme] = useState<string>(""); 
   const [products, setProducts] = useState<ProductItem[]>(DEFAULT_PRODUCTS);
   const [status, setStatus] = useState<"idle" | "analyzing" | "generating" | "done">("idle");
   const [progressMessage, setProgressMessage] = useState<string>("");
   const [progress, setProgress] = useState<number>(0);
   const [results, setResults] = useState<GenerationResult[]>([]);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [isLoaded, setIsLoaded] = useState(false); // New state to track if initial load is done
+  const [isLoaded, setIsLoaded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const refFileInputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null); // For cancelling requests
+
+  // Cleanup on unmount or refresh
+  useEffect(() => {
+    return () => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+        }
+    };
+  }, []);
 
   // Load products and design theme from localStorage on mount
   useEffect(() => {
@@ -261,10 +275,22 @@ export default function Home() {
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const resized = await resizeImage(file);
-      setImage(resized);
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      const filesToProcess = files.slice(0, 20); // Limit to 20 images
+      
+      // Show loading state or alert if too many images? 
+      // For now just process them.
+      
+      const newImages = await Promise.all(filesToProcess.map(async (file, idx) => {
+          const resized = await resizeImage(file);
+          return {
+              id: Date.now() + Math.random().toString() + idx,
+              url: resized,
+              name: file.name.replace(/\.[^/.]+$/, "")
+          };
+      }));
+      setImages(newImages);
     }
   };
 
@@ -325,7 +351,7 @@ export default function Home() {
     const resultsRef = useRef<HTMLElement>(null);
 
     const handleGenerate = async () => {
-        if (!image) return;
+        if (images.length === 0) return;
 
         const enabledProducts = products.filter(p => p.enabled);
         if (enabledProducts.length === 0) {
@@ -333,139 +359,202 @@ export default function Home() {
             return;
         }
 
+        // Initialize AbortController
+        abortControllerRef.current = new AbortController();
+        const signal = abortControllerRef.current.signal;
+
         // Scroll to results section
         setTimeout(() => {
             resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }, 100);
 
-        setStatus("generating"); // Use generating directly as we do both now
-    const estimatedAnalysisTime = 4; // Reduced estimate per product
-    const estimatedGenTimePerImage = 15;
-    setProgress(5);
-    
-    // Initialize results with waiting state
-    const initialResults = enabledProducts.map(p => ({
-        product: p.name,
-        prompt: "Waiting to start...",
-        pattern_description: "",
-        scene_description: "",
-        loading: true,
-        statusText: "Waiting..."
-    }));
-    setResults(initialResults);
+        setStatus("generating");
+        setProgress(0);
+        
+        // Create task list: (Image x Product)
+        const tasks: { 
+            taskId: string, 
+            image: SubjectImage, 
+            product: ProductItem,
+            resultIndex: number 
+        }[] = [];
 
-    // Enhanced Parallel Generation
-    try {
-        const totalSteps = enabledProducts.length * 2; // 2 steps per product (Analyze, Generate)
-        let completedSteps = 0;
+        let resultIndex = 0;
+        // Initialize results with waiting state
+        const initialResults: GenerationResult[] = [];
 
-        const updateGlobalProgress = () => {
-            completedSteps++;
-            const percentage = Math.min(Math.floor((completedSteps / totalSteps) * 100), 99);
-            setProgress(percentage);
-        };
-
-        // PARALLEL execution (Frontend direct call)
-        await Promise.all(enabledProducts.map(async (productConfig, idx) => {
-            const productName = productConfig.name;
-
-            // Update individual item state helper
-            const updateItemState = (update: Partial<GenerationResult>) => {
-                setResults(prev => {
-                    const next = [...prev];
-                    next[idx] = { ...next[idx], ...update };
-                    return next;
+        images.forEach(img => {
+            enabledProducts.forEach(prod => {
+                tasks.push({
+                    taskId: `${img.id}-${prod.id}`,
+                    image: img,
+                    product: prod,
+                    resultIndex: resultIndex
                 });
+                initialResults.push({
+                    subjectName: img.name,
+                    product: prod.name,
+                    prompt: "Waiting to start...",
+                    pattern_description: "",
+                    scene_description: "",
+                    loading: true,
+                    statusText: "Waiting..."
+                });
+                resultIndex++;
+            });
+        });
+
+        setResults(initialResults);
+
+        try {
+            const totalTasks = tasks.length;
+            const totalSteps = totalTasks * 2; // Analyze + Generate
+            let completedSteps = 0;
+
+            const updateGlobalProgress = () => {
+                completedSteps++;
+                const percentage = Math.min(Math.floor((completedSteps / totalSteps) * 100), 99);
+                setProgress(percentage);
             };
 
-            // 1. Analyze Phase
-            let pattern_desc = "";
-            let scene_desc = "";
-            
-            // Start local countdown for Analysis
-            let analysisTime = 30;
-            updateItemState({ loading: true, statusText: `Analyzing... (${analysisTime}s)` });
-            const analysisTimer = setInterval(() => {
-                analysisTime--;
-                if (analysisTime > 0) {
-                    updateItemState({ statusText: `Analyzing... (${analysisTime}s)` });
-                } else {
-                    updateItemState({ statusText: `Analyzing... (Processing)` });
-                }
-            }, 1000);
+            const CONCURRENCY_LIMIT = 12;
+            const activePromises: Promise<void>[] = [];
+            let taskIndex = 0;
 
-            try {
-                // Call Frontend Function directly
-                const data = await analyzeImage(image, productName, designTheme);
-                
-                clearInterval(analysisTimer); // Stop timer on response
+            const executeTask = async (task: typeof tasks[0]) => {
+                if (signal.aborted) return;
 
-                const design = data.design;
-                
-                if (design) {
-                    pattern_desc = design.pattern_description;
-                    scene_desc = design.scene_description;
-                    updateItemState({ 
-                        prompt: `Pattern: ${pattern_desc}\nScene: ${scene_desc}`,
-                        pattern_description: pattern_desc,
-                        scene_description: scene_desc
+                const { image: img, product: prod, resultIndex: idx } = task;
+                const productName = prod.name;
+
+                const updateItemState = (update: Partial<GenerationResult>) => {
+                    setResults(prev => {
+                        const next = [...prev];
+                        next[idx] = { ...next[idx], ...update };
+                        return next;
                     });
+                };
+
+                // 1. Analyze Phase
+                let pattern_desc = "";
+                let scene_desc = "";
+                
+                let analysisTime = 30;
+                updateItemState({ loading: true, statusText: `Analyzing... (${analysisTime}s)` });
+                const analysisTimer = setInterval(() => {
+                    analysisTime--;
+                    if (analysisTime > 0) {
+                        updateItemState({ statusText: `Analyzing... (${analysisTime}s)` });
+                    } else {
+                        updateItemState({ statusText: `Analyzing... (Processing)` });
+                    }
+                }, 1000);
+
+                try {
+                    if (signal.aborted) throw new Error("Aborted");
+                    const data = await analyzeImage(img.url, productName, designTheme);
+                    clearInterval(analysisTimer);
+
+                    const design = data.design;
+                    if (design) {
+                        pattern_desc = design.pattern_description;
+                        scene_desc = design.scene_description;
+                        updateItemState({ 
+                            prompt: `Pattern: ${pattern_desc}\nScene: ${scene_desc}`,
+                            pattern_description: pattern_desc,
+                            scene_description: scene_desc
+                        });
+                    }
+                } catch (err: any) {
+                    clearInterval(analysisTimer);
+                    if (err.message !== "Aborted") {
+                        console.error(`Analysis error for ${productName}:`, err);
+                        updateItemState({ error: "Analysis Failed", loading: false, statusText: "Failed" });
+                    }
+                    return; 
                 }
-            } catch (err: any) {
-                clearInterval(analysisTimer);
-                console.error(`Analysis error for ${productName}:`, err);
-                updateItemState({ error: "Analysis Failed", loading: false, statusText: "Failed" });
-                return; // Stop this product flow
+                
+                updateGlobalProgress();
+
+                // 2. Generate Phase
+                let genTime = 30;
+                updateItemState({ loading: true, statusText: `Generating Image... (${genTime}s)` });
+                const genTimer = setInterval(() => {
+                    genTime--;
+                    if (genTime > 0) {
+                        updateItemState({ statusText: `Generating Image... (${genTime}s)` });
+                    } else {
+                        updateItemState({ statusText: `Generating Image... (Processing)` });
+                    }
+                }, 1000);
+
+                try {
+                    if (signal.aborted) throw new Error("Aborted");
+                    const genData = await generateImage(img.url, productName, pattern_desc, scene_desc);
+                    clearInterval(genTimer);
+                    
+                    updateItemState({
+                        loading: false,
+                        imageUrl: genData.result || undefined,
+                        error: undefined,
+                        statusText: "Done"
+                    });
+                } catch (error: any) {
+                    clearInterval(genTimer);
+                    if (error.message !== "Aborted") {
+                        console.error(`Error generating for ${productName}:`, error);
+                        updateItemState({ loading: false, error: "Generation Failed", statusText: "Failed" });
+                    }
+                }
+
+                updateGlobalProgress();
+            };
+
+            // Queue Processor
+            while (taskIndex < tasks.length) {
+                if (signal.aborted) break;
+
+                // Fill up active promises to limit
+                while (activePromises.length < CONCURRENCY_LIMIT && taskIndex < tasks.length) {
+                    const task = tasks[taskIndex++];
+                    const promise = executeTask(task).then(() => {
+                        // Remove self from active promises
+                        const idx = activePromises.indexOf(promise);
+                        if (idx > -1) activePromises.splice(idx, 1);
+                    });
+                    activePromises.push(promise);
+                }
+
+                // Wait for at least one to finish before adding more
+                if (activePromises.length >= CONCURRENCY_LIMIT) {
+                    await Promise.race(activePromises);
+                } else if (activePromises.length > 0) {
+                    // If we have fewer than limit but no more tasks, wait for all
+                    await Promise.all(activePromises);
+                }
             }
             
-            updateGlobalProgress();
+            // Wait for remaining
+            await Promise.all(activePromises);
 
-            // 2. Generate Phase
-            // Start local countdown for Generation
-            let genTime = 30;
-            updateItemState({ loading: true, statusText: `Generating Image... (${genTime}s)` });
-            const genTimer = setInterval(() => {
-                genTime--;
-                if (genTime > 0) {
-                    updateItemState({ statusText: `Generating Image... (${genTime}s)` });
-                } else {
-                    updateItemState({ statusText: `Generating Image... (Processing)` });
-                }
-            }, 1000);
-
-            try {
-                // Call Frontend Function directly
-                const genData = await generateImage(image, productName, pattern_desc, scene_desc);
-                
-                clearInterval(genTimer); // Stop timer
-                
-                updateItemState({
-                    loading: false,
-                    imageUrl: genData.result || undefined,
-                    error: undefined,
-                    statusText: "Done"
-                });
-            } catch (error: any) {
-                clearInterval(genTimer);
-                console.error(`Error generating for ${productName}:`, error);
-                updateItemState({ loading: false, error: "Generation Failed", statusText: "Failed" });
+            if (!signal.aborted) {
+                setStatus("done");
+                setProgressMessage("批量生成完成！");
+                setProgress(100);
             }
 
-            updateGlobalProgress();
-        }));
-
-      setStatus("done");
-      setProgressMessage("设计完成！");
-      setProgress(100);
-
-    } catch (error: any) {
-      console.error(error);
-      setStatus("idle");
-      setProgressMessage("");
-      setProgress(0);
-      alert("An error occurred. Please try again.");
-    }
-  };
+        } catch (error: any) {
+            if (error.message !== "Aborted") {
+                console.error(error);
+                setStatus("idle");
+                setProgressMessage("");
+                setProgress(0);
+                alert("An error occurred. Please try again.");
+            }
+        } finally {
+            abortControllerRef.current = null;
+        }
+    };
 
   const getFormattedName = (index: number) => {
       return (index + 2).toString().padStart(4, '0');
@@ -489,47 +578,52 @@ export default function Home() {
       if (results.length === 0) return;
       
       const zip = new JSZip();
-      const folder = zip.folder("leewow 视频物料");
+      const mainFolder = zip.folder("leewow 视频物料");
       
-      if (!folder) return;
+      if (!mainFolder) return;
 
       const validResults = results.filter(r => r.imageUrl);
       
       for (let i = 0; i < validResults.length; i++) {
           const result = validResults[i];
           if (result.imageUrl) {
-              const filename = `${getFormattedName(i)}.jpg`;
+              // Structure: MainFolder / SubjectName / Product_Index.jpg
+              // Sanitize folder names
+              const safeSubjectName = result.subjectName.replace(/[^a-z0-9]/gi, '_').substring(0, 20);
+              const subjectFolder = mainFolder.folder(safeSubjectName);
               
-              try {
-                  let data: Blob | string = "";
-                  let isBase64 = false;
+              if (subjectFolder) {
+                  const filename = `${result.product.replace(/[^a-z0-9]/gi, '_')}_${i.toString().padStart(3, '0')}.jpg`;
+                  
+                  try {
+                      let data: Blob | string = "";
+                      let isBase64 = false;
 
-                  if (result.imageUrl.startsWith("data:")) {
-                      // Handle Base64
-                      data = result.imageUrl.split(",")[1];
-                      isBase64 = true;
-                  } else {
-                      // Handle URL
-                      const response = await fetch(result.imageUrl);
-                      data = await response.blob();
-                      isBase64 = false;
+                      if (result.imageUrl.startsWith("data:")) {
+                          data = result.imageUrl.split(",")[1];
+                          isBase64 = true;
+                      } else {
+                          const response = await fetch(result.imageUrl);
+                          data = await response.blob();
+                          isBase64 = false;
+                      }
+
+                      if (isBase64) {
+                           subjectFolder.file(filename, data, { base64: true });
+                      } else {
+                           subjectFolder.file(filename, data);
+                      }
+
+                  } catch (err) {
+                      console.error(`Failed to add ${filename} to zip`, err);
                   }
-
-                  if (isBase64) {
-                       folder.file(filename, data, { base64: true });
-                  } else {
-                       folder.file(filename, data);
-                  }
-
-              } catch (err) {
-                  console.error(`Failed to add ${filename} to zip`, err);
               }
           }
       }
 
       try {
           const content = await zip.generateAsync({ type: "blob" });
-          saveAs(content, "leewow 视频物料.zip");
+          saveAs(content, "leewow_batch_results.zip");
       } catch (err) {
           console.error("Failed to generate zip", err);
           alert("打包下载失败，请重试");
@@ -552,11 +646,6 @@ export default function Home() {
           <h1 className="text-5xl md:text-6xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-violet-600 to-indigo-600 mb-4 tracking-tight uppercase">
             Leewow's Design Agent
           </h1>
-          {/* 
-          <p className="text-xl md:text-2xl text-neutral-500 dark:text-neutral-400 font-light tracking-wide">
-            Leewow
-          </p>
-          */}
         </header>
 
         {/* Upload Section */}
@@ -564,22 +653,32 @@ export default function Home() {
           <div className="bg-white dark:bg-neutral-800 rounded-3xl shadow-2xl p-8 md:p-10 border border-neutral-100 dark:border-neutral-700 backdrop-blur-sm bg-opacity-80 dark:bg-opacity-80 transition-all hover:shadow-3xl duration-500">
             <div className="flex flex-col gap-10">
                 <div className="flex flex-col lg:flex-row gap-10">
-                    {/* Main Image Upload */}
+                    {/* Main Image Upload (Multiple) */}
                     <div 
                         onClick={() => fileInputRef.current?.click()}
                         className={clsx(
                             "w-full lg:w-5/12 h-80 md:h-96 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all duration-300 relative overflow-hidden group",
-                            image ? "border-violet-500 bg-neutral-50 dark:bg-neutral-900" : "border-neutral-300 hover:border-violet-400 hover:bg-neutral-50 dark:border-neutral-600 dark:hover:bg-neutral-700/50"
+                            images.length > 0 ? "border-violet-500 bg-neutral-50 dark:bg-neutral-900" : "border-neutral-300 hover:border-violet-400 hover:bg-neutral-50 dark:border-neutral-600 dark:hover:bg-neutral-700/50"
                         )}
                     >
-                        {image ? (
-                            <img src={image} alt="Main Subject" className="w-full h-full object-contain p-4 group-hover:scale-105 transition-transform duration-500" />
+                        {images.length > 0 ? (
+                             <div className="w-full h-full p-4 flex flex-col items-center justify-center gap-4">
+                                <div className="grid grid-cols-3 gap-2 w-full max-h-60 overflow-y-auto p-2">
+                                    {images.map((img, i) => (
+                                        <div key={i} className="relative aspect-square rounded-lg overflow-hidden border border-neutral-200">
+                                            <img src={img.url} alt={img.name} className="w-full h-full object-cover" />
+                                        </div>
+                                    ))}
+                                </div>
+                                <p className="text-sm font-medium text-violet-600">{images.length} 张图片已上传</p>
+                                <p className="text-xs text-neutral-400">点击重新上传 (支持多选)</p>
+                            </div>
                         ) : (
                             <div className="flex flex-col items-center gap-4 text-neutral-400 group-hover:text-violet-500 transition-colors">
                                 <div className="p-4 rounded-full bg-neutral-100 dark:bg-neutral-700 group-hover:bg-violet-50 dark:group-hover:bg-violet-900/20 transition-colors">
                                     <Upload className="w-8 h-8" />
                                 </div>
-                                <p className="text-lg font-medium">上传主体图片 (人物/宠物)</p>
+                                <p className="text-lg font-medium">上传主体图片 (支持多选, 最多20张)</p>
                                 <p className="text-sm opacity-70">点击或拖拽文件至此</p>
                             </div>
                         )}
@@ -589,8 +688,10 @@ export default function Home() {
                             onChange={handleImageUpload} 
                             className="hidden" 
                             accept="image/*"
+                            multiple // Enable multiple selection
                         />
                     </div>
+
 
                     {/* Settings & Generate */}
                     <div className="flex-1 space-y-8">
@@ -734,13 +835,13 @@ export default function Home() {
 
                         <button
                             onClick={handleGenerate}
-                            disabled={!image || status === "analyzing" || status === "generating"}
+                            disabled={images.length === 0 || status === "analyzing" || status === "generating"}
                             className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-violet-500/30 transform transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none flex items-center justify-center gap-3 text-lg"
                         >
                             {status === "analyzing" || status === "generating" ? (
                                  <>
                                     <Loader2 className="animate-spin w-6 h-6" />
-                                    <span>Generating Designs...</span>
+                                    <span>Generating Designs ({progress}%)...</span>
                                  </>
                             ) : (
                                  "Generate Designs"
@@ -806,7 +907,7 @@ export default function Home() {
                             initial={{ opacity: 0, y: 30 }}
                             animate={{ opacity: 1, y: 0 }}
                             exit={{ opacity: 0 }}
-                            transition={{ delay: idx * 0.1, type: "spring", stiffness: 100 }}
+                            transition={{ delay: idx * 0.05, type: "spring", stiffness: 100 }}
                             className="bg-white dark:bg-neutral-800 rounded-3xl overflow-hidden shadow-xl hover:shadow-2xl transition-all duration-500 group border border-neutral-100 dark:border-neutral-700"
                         >
                             <div className="h-[500px] bg-neutral-100 dark:bg-neutral-700/50 relative flex items-center justify-center overflow-hidden">
@@ -819,6 +920,7 @@ export default function Home() {
                                             </div>
                                         </div>
                                         <span className="text-sm font-medium text-violet-600 dark:text-violet-400 animate-pulse tracking-wide">{result.statusText || "Processing..."}</span>
+                                        <p className="text-xs text-neutral-400 mt-1">{result.subjectName}</p>
                                     </div>
                                 ) : result.imageUrl ? (
                                     <>
@@ -828,29 +930,12 @@ export default function Home() {
                                             className="w-full h-full object-contain transition-transform duration-700 group-hover:scale-105 cursor-zoom-in p-2" 
                                             onClick={() => setSelectedImage(result.imageUrl || null)}
                                         />
-                                        {/* Overlay Actions */}
-                                        {/* Removed Zoom Button overlay, click image to zoom directly */}
-                                        {/* 
-                                        <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center gap-4 pointer-events-none group-hover:pointer-events-auto">
-                                            <button 
-                                                onClick={() => setSelectedImage(result.imageUrl || null)}
-                                                className="bg-white text-neutral-900 p-4 rounded-full shadow-2xl hover:scale-110 transition-transform duration-300"
-                                                title="Zoom In"
-                                            >
-                                                <ZoomIn className="w-6 h-6" />
-                                            </button>
-                                            <button 
-                                                onClick={() => handleDownload(result.imageUrl!, `${getFormattedName(idx)}.jpg`)}
-                                                className="bg-violet-600 text-white p-4 rounded-full shadow-2xl hover:scale-110 transition-transform duration-300"
-                                                title="Download"
-                                            >
-                                                <Download className="w-6 h-6" />
-                                            </button>
-                                        </div>
-                                        */}
                                         {/* Name Tag */}
                                         <div className="absolute top-6 left-6 bg-white/90 dark:bg-black/80 backdrop-blur-md text-neutral-900 dark:text-white px-4 py-1.5 rounded-full text-sm font-mono font-medium shadow-lg">
                                             {getFormattedName(idx)}
+                                        </div>
+                                        <div className="absolute top-6 right-6 bg-violet-500/90 backdrop-blur-md text-white px-3 py-1 rounded-full text-xs font-medium shadow-lg">
+                                            {result.subjectName}
                                         </div>
                                     </>
                                 ) : (
@@ -864,12 +949,15 @@ export default function Home() {
                             </div>
                             <div className="p-6 bg-white dark:bg-neutral-800 relative z-10">
                                 <div className="flex justify-between items-center mb-4">
-                                    <h3 className="font-bold text-xl text-neutral-800 dark:text-white group-hover:text-violet-600 transition-colors">{result.product}</h3>
+                                    <div>
+                                        <h3 className="font-bold text-xl text-neutral-800 dark:text-white group-hover:text-violet-600 transition-colors">{result.product}</h3>
+                                        <p className="text-xs text-neutral-400 mt-1">Subject: {result.subjectName}</p>
+                                    </div>
                                     <div className="flex items-center gap-3">
                                         <span className="text-xs font-mono text-neutral-400 bg-neutral-100 dark:bg-neutral-700 px-2 py-1 rounded-md">{getFormattedName(idx)}</span>
                                         {result.imageUrl && (
                                             <button 
-                                                onClick={() => handleDownload(result.imageUrl!, `${getFormattedName(idx)}.jpg`)}
+                                                onClick={() => handleDownload(result.imageUrl!, `${result.subjectName}_${result.product}_${getFormattedName(idx)}.jpg`)}
                                                 className="text-violet-600 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300 transition-colors p-1"
                                                 title="Download Image"
                                             >
