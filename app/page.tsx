@@ -6,6 +6,144 @@ import clsx from "clsx";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
+import OpenAI from "openai";
+
+// Initialize OpenAI Client (Frontend)
+const getClient = () => {
+  const apiKey = process.env.NEXT_PUBLIC_LAOZHANG_API_KEY;
+  if (!apiKey) {
+      throw new Error("API Key missing. Please set NEXT_PUBLIC_LAOZHANG_API_KEY in .env.local or Vercel Environment Variables.");
+  }
+  return new OpenAI({
+    apiKey: apiKey,
+    baseURL: "https://api.laozhang.ai/v1",
+    dangerouslyAllowBrowser: true // Allow running in browser
+  });
+};
+
+// --- API Functions (Moved to Frontend) ---
+
+const analyzeImage = async (image: string, product: string, designTheme: string) => {
+    const client = getClient();
+    const targetProduct = product || "Merchandise";
+    const baseStyle = "The design style should be fashionable, funny, or interesting.";
+    const styleContext = designTheme 
+        ? `The design theme MUST be strictly based on: "${designTheme}". ${baseStyle}`
+        : baseStyle;
+
+    const prompt = `
+      Analyze the uploaded image.
+      1. Identify the main subject (person or pet).
+      2. Create a UNIQUE, creative design idea based on the subject, specifically for this product: "${targetProduct}".
+      3. ${styleContext}
+      4. The design should be high-quality, suitable for POD (Print on Demand).
+      5. TARGET AUDIENCE: North American market. 
+      6. CULTURE & TEXT: Ensure any text or cultural references in the pattern are appropriate for North American culture and MUST be in ENGLISH.
+      7. IMPORTANT: The output descriptions themselves (pattern_description and scene_description) MUST be in CHINESE (Simplified Chinese) for the user to understand, BUT if the pattern description includes specific text to be printed on the product, that text should be specified in English.
+      8. You must provide TWO parts:
+         - "pattern_description": The description of the graphic/pattern itself (e.g., "Cute cat in space suit vector art with text 'SPACE PAWS'").
+         - "scene_description": A high-end, photorealistic scene description where this SPECIFIC product ("${targetProduct}") is placed.
+      9. Return the result in JSON format with the following structure:
+      {
+        "subject_description": "Brief description of the subject in Chinese",
+        "design": {
+            "product": "${targetProduct}",
+            "pattern_description": "Pattern description in Chinese...",
+            "scene_description": "High-end scene description in Chinese..."
+        }
+      }
+    `;
+
+    const response = await client.chat.completions.create({
+      model: "gemini-2.5-pro-thinking", 
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: image } },
+          ],
+        },
+      ],
+    });
+
+    const content = response.choices[0].message.content || "";
+    
+    let jsonString = content;
+    const jsonBlockMatch = content.match(/```json\n?([\s\S]*?)\n?```/);
+    if (jsonBlockMatch) {
+        jsonString = jsonBlockMatch[1];
+    } else {
+        const firstBrace = content.indexOf('{');
+        const lastBrace = content.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1) {
+            jsonString = content.substring(firstBrace, lastBrace + 1);
+        }
+    }
+    
+    return JSON.parse(jsonString.trim());
+};
+
+const generateImage = async (image: string, product: string, pattern_desc: string, scene_desc: string) => {
+    const client = getClient();
+    const fullPrompt = `Design Pattern: ${pattern_desc}. High-end Scene Context: ${scene_desc}`;
+
+    const systemInstruction = `
+      You are an expert Product Designer for POD (Print on Demand) merchandise. 
+      Your goal is to generate a HIGH-QUALITY, COMMERCIAL-GRADE product mockups.
+      Rules:
+      1. Focus on the product: ${product || "Merchandise"}. The product must be the ABSOLUTE MAIN SUBJECT.
+      2. MINIMALIST COMPOSITION: Avoid clutter. The background and surrounding elements should be simple, clean, and not distracting.
+      3. Reference Style: Mimic provided style if any.
+      4. Subject Integration: Blend the subject seamlessly.
+      5. Output: Clean, professional product shot.
+      6. Aspect Ratio: 9:16 (Portrait).
+      7. Resolution: 2K (High Definition).
+      8. RETURN ONLY THE URL.
+    `;
+
+    const userPrompt = `
+      ${systemInstruction}
+      
+      Design Task: ${fullPrompt}. Create a photorealistic ${product || "product"} design.
+      
+      IMPORTANT: The FIRST attached image is the SOURCE/PATTERN image. Use this image as the main subject or pattern source for the design.
+      
+      CRITICAL: Keep the scene CLEAN and UNCLUTTERED. The product should take up the majority of the frame and be clearly visible. Avoid excessive props or busy backgrounds.
+    `;
+
+    const response = await client.chat.completions.create({
+      model: "gemini-3-pro-image-preview",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: userPrompt },
+            { type: "image_url", image_url: { url: image } },
+          ],
+        },
+      ],
+    });
+
+    const content = response.choices[0].message.content || "";
+    let imageUrl = null;
+      
+    const markdownMatch = content.match(/!\[.*?\]\((https?:\/\/.*?|data:image\/.*?)\)/);
+    const dataUriMatch = content.match(/(data:image\/[a-zA-Z]*;base64,[^\s)]+)/);
+    const urlMatch = content.match(/(https?:\/\/[^\s)]+)/);
+
+    if (markdownMatch) imageUrl = markdownMatch[1];
+    else if (dataUriMatch) imageUrl = dataUriMatch[1];
+    else if (urlMatch) imageUrl = urlMatch[1];
+    
+    if (imageUrl && !imageUrl.startsWith('data:')) {
+        imageUrl = imageUrl.replace(/[).,;]+$/, "").trim();
+    }
+
+    if (!imageUrl) throw new Error("No image URL found in response");
+
+    return { result: imageUrl };
+};
 
 // Default products
 const DEFAULT_PRODUCTS = [
@@ -167,10 +305,8 @@ export default function Home() {
             setProgress(percentage);
         };
 
-        // Sequential execution to avoid Vercel timeouts on free tier
-        for (let i = 0; i < products.length; i++) {
-            const productConfig = products[i];
-            const idx = i;
+        // PARALLEL execution (Frontend direct call)
+        await Promise.all(products.map(async (productConfig, idx) => {
             const productName = productConfig.name;
 
             // Update individual item state helper
@@ -188,24 +324,18 @@ export default function Home() {
             
             // Start local countdown for Analysis
             let analysisTime = 30;
-            updateItemState({ loading: true, statusText: `Analyzing... (${analysisTime}s)` });
+            updateItemState({ loading: true, statusText: `Analyzing...` }); // Removed countdown text for cleaner UI or keep simpler
             const analysisTimer = setInterval(() => {
                 analysisTime--;
-                if (analysisTime > 0) updateItemState({ statusText: `Analyzing... (${analysisTime}s)` });
+                // updateItemState({ statusText: `Analyzing... (${analysisTime}s)` }); // Optional: update text
             }, 1000);
 
             try {
-                const analyzeResponse = await fetch("/api/analyze", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ image, product: productName, designTheme }),
-                });
+                // Call Frontend Function directly
+                const data = await analyzeImage(image, productName, designTheme);
                 
                 clearInterval(analysisTimer); // Stop timer on response
 
-                if (!analyzeResponse.ok) throw new Error(`Analysis failed`);
-
-                const data = await analyzeResponse.json();
                 const design = data.design;
                 
                 if (design) {
@@ -217,11 +347,11 @@ export default function Home() {
                         scene_description: scene_desc
                     });
                 }
-            } catch (err) {
+            } catch (err: any) {
                 clearInterval(analysisTimer);
                 console.error(`Analysis error for ${productName}:`, err);
                 updateItemState({ error: "Analysis Failed", loading: false, statusText: "Failed" });
-                continue; // Skip to next product on error
+                return; // Stop this product flow
             }
             
             updateGlobalProgress();
@@ -229,32 +359,22 @@ export default function Home() {
             // 2. Generate Phase
             // Start local countdown for Generation
             let genTime = 30;
-            updateItemState({ loading: true, statusText: `Generating Image... (${genTime}s)` });
+            updateItemState({ loading: true, statusText: `Generating Image...` });
             const genTimer = setInterval(() => {
                 genTime--;
-                if (genTime > 0) updateItemState({ statusText: `Generating Image... (${genTime}s)` });
+                // updateItemState({ statusText: `Generating Image... (${genTime}s)` });
             }, 1000);
 
             try {
-                const genResponse = await fetch("/api/generate", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ 
-                        pattern_description: pattern_desc,
-                        scene_description: scene_desc,
-                        image,
-                        product: productName 
-                    }),
-                });
+                // Call Frontend Function directly
+                const genData = await generateImage(image, productName, pattern_desc, scene_desc);
                 
                 clearInterval(genTimer); // Stop timer
-                
-                const genData = await genResponse.json();
                 
                 updateItemState({
                     loading: false,
                     imageUrl: genData.result || null,
-                    error: genData.error,
+                    error: null,
                     statusText: "Done"
                 });
             } catch (error: any) {
@@ -264,7 +384,7 @@ export default function Home() {
             }
 
             updateGlobalProgress();
-        }
+        }));
 
       setStatus("done");
       setProgressMessage("设计完成！");
