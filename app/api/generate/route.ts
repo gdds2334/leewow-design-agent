@@ -1,7 +1,7 @@
 import { OpenAI } from "openai";
 import { NextResponse } from "next/server";
 
-export const maxDuration = 60; // Increase timeout to 60 seconds
+export const maxDuration = 300; // Set to 5 minutes (requires Vercel Pro for >60s)
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {

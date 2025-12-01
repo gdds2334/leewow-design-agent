@@ -1,7 +1,7 @@
 import { OpenAI } from "openai";
 import { NextResponse } from "next/server";
 
-export const maxDuration = 60;
+export const maxDuration = 300; // Set to 5 minutes (requires Vercel Pro for >60s)
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
@@ -64,10 +64,10 @@ export async function POST(req: Request) {
       }
     `;
 
-    console.log(`[Analyze] Starting analysis for product: ${targetProduct} with model: gemini-2.5-flash-preview-09-2025`);
+    console.log(`[Analyze] Starting analysis for product: ${targetProduct} with model: gemini-2.5-pro-thinking`);
 
     const response = await client.chat.completions.create({
-      model: "gemini-2.5-flash-preview-09-2025", 
+      model: "gemini-2.5-pro-thinking", 
       messages: [
         {
           role: "user",
