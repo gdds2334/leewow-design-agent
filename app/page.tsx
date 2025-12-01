@@ -17,7 +17,8 @@ const getClient = () => {
   return new OpenAI({
     apiKey: apiKey,
     baseURL: "https://api.laozhang.ai/v1",
-    dangerouslyAllowBrowser: true // Allow running in browser
+    dangerouslyAllowBrowser: true, // Allow running in browser
+    timeout: 600000, // Set timeout to 10 minutes (600000 ms) to handle slow generations
   });
 };
 
@@ -324,10 +325,14 @@ export default function Home() {
             
             // Start local countdown for Analysis
             let analysisTime = 30;
-            updateItemState({ loading: true, statusText: `Analyzing...` }); // Removed countdown text for cleaner UI or keep simpler
+            updateItemState({ loading: true, statusText: `Analyzing... (${analysisTime}s)` });
             const analysisTimer = setInterval(() => {
                 analysisTime--;
-                // updateItemState({ statusText: `Analyzing... (${analysisTime}s)` }); // Optional: update text
+                if (analysisTime > 0) {
+                    updateItemState({ statusText: `Analyzing... (${analysisTime}s)` });
+                } else {
+                    updateItemState({ statusText: `Analyzing... (Processing)` });
+                }
             }, 1000);
 
             try {
@@ -359,10 +364,14 @@ export default function Home() {
             // 2. Generate Phase
             // Start local countdown for Generation
             let genTime = 30;
-            updateItemState({ loading: true, statusText: `Generating Image...` });
+            updateItemState({ loading: true, statusText: `Generating Image... (${genTime}s)` });
             const genTimer = setInterval(() => {
                 genTime--;
-                // updateItemState({ statusText: `Generating Image... (${genTime}s)` });
+                if (genTime > 0) {
+                    updateItemState({ statusText: `Generating Image... (${genTime}s)` });
+                } else {
+                    updateItemState({ statusText: `Generating Image... (Processing)` });
+                }
             }, 1000);
 
             try {
