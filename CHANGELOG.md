@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 (2025-01-XX)
+
+### Features
+- **Clipboard Paste**: Support pasting images directly from clipboard (Ctrl+V) into the upload area.
+- **Image Management**: Added ability to remove individual images from the upload list.
+- **Cleanups**: Removed unused video editing features and assets.
+
 ## 0.4.0 (2025-01-XX)
 
 ### Features

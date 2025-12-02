@@ -275,24 +275,46 @@ export default function Home() {
     });
   };
 
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length > 0) {
-      const filesToProcess = files.slice(0, 20); // Limit to 20 images
-      
-      // Show loading state or alert if too many images? 
-      // For now just process them.
-      
+  const processFiles = async (files: File[]) => {
+      if (files.length === 0) return;
+
+      // Limit total images (existing + new) to 20? Or just process first 20 of this batch?
+      // Requirement said "upload up to 20". Let's just process and let user manage.
+      // Or slice to max 20 for safety.
+      const filesToProcess = files.slice(0, 20);
+
       const newImages = await Promise.all(filesToProcess.map(async (file, idx) => {
           const resized = await resizeImage(file);
           return {
               id: Date.now() + Math.random().toString() + idx,
               url: resized,
-              name: file.name.replace(/\.[^/.]+$/, "")
+              name: file.name.replace(/\.[^/.]+$/, "") || "pasted_image"
           };
       }));
-      setImages(newImages);
-    }
+      
+      setImages(prev => [...prev, ...newImages]);
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    await processFiles(files);
+    // Reset input so same file can be selected again if needed
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent) => {
+      const items = e.clipboardData.items;
+      const files: File[] = [];
+      for (let i = 0; i < items.length; i++) {
+          if (items[i].type.indexOf("image") !== -1) {
+              const file = items[i].getAsFile();
+              if (file) files.push(file);
+          }
+      }
+      if (files.length > 0) {
+          e.preventDefault(); // Prevent default paste behavior
+          await processFiles(files);
+      }
   };
 
   /*
@@ -667,8 +689,10 @@ export default function Home() {
                     {/* Main Image Upload (Multiple) */}
                     <div 
                         onClick={() => fileInputRef.current?.click()}
+                        onPaste={handlePaste}
+                        tabIndex={0}
                         className={clsx(
-                            "w-full lg:w-5/12 h-80 md:h-96 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all duration-300 relative overflow-hidden group",
+                            "w-full lg:w-5/12 h-80 md:h-96 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all duration-300 relative overflow-hidden group outline-none focus:ring-2 focus:ring-violet-500/50",
                             images.length > 0 ? "border-violet-500 bg-neutral-50 dark:bg-neutral-900" : "border-neutral-300 hover:border-violet-400 hover:bg-neutral-50 dark:border-neutral-600 dark:hover:bg-neutral-700/50"
                         )}
                     >
@@ -676,21 +700,30 @@ export default function Home() {
                              <div className="w-full h-full p-4 flex flex-col items-center justify-center gap-4">
                                 <div className="grid grid-cols-3 gap-2 w-full max-h-60 overflow-y-auto p-2">
                                     {images.map((img, i) => (
-                                        <div key={i} className="relative aspect-square rounded-lg overflow-hidden border border-neutral-200">
+                                        <div key={i} className="relative aspect-square rounded-lg overflow-hidden border border-neutral-200 group/item">
                                             <img src={img.url} alt={img.name} className="w-full h-full object-cover" />
+                                            <button 
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setImages(images.filter((_, idx) => idx !== i));
+                                                }}
+                                                className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover/item:opacity-100 transition-opacity"
+                                            >
+                                                <X className="w-3 h-3" />
+                                            </button>
                                         </div>
                                     ))}
                                 </div>
                                 <p className="text-sm font-medium text-violet-600">{images.length} 张图片已上传</p>
-                                <p className="text-xs text-neutral-400">点击重新上传 (支持多选)</p>
+                                <p className="text-xs text-neutral-400">点击继续上传 或 Ctrl+V 粘贴</p>
                             </div>
                         ) : (
                             <div className="flex flex-col items-center gap-4 text-neutral-400 group-hover:text-violet-500 transition-colors">
                                 <div className="p-4 rounded-full bg-neutral-100 dark:bg-neutral-700 group-hover:bg-violet-50 dark:group-hover:bg-violet-900/20 transition-colors">
                                     <Upload className="w-8 h-8" />
                                 </div>
-                                <p className="text-lg font-medium">上传主体图片 (支持多选, 最多20张)</p>
-                                <p className="text-sm opacity-70">点击或拖拽文件至此</p>
+                                <p className="text-lg font-medium">上传主体图片</p>
+                                <p className="text-sm opacity-70">点击选择、拖拽 或 Ctrl+V 粘贴</p>
                             </div>
                         )}
                         <input 
