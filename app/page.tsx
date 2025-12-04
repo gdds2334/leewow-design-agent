@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Upload, Image as ImageIcon, Loader2, X, Plus, Settings, Lightbulb, Download, ZoomIn, Package, ToggleLeft, ToggleRight } from "lucide-react";
+import { Upload, Image as ImageIcon, Loader2, X, Plus, Settings, Lightbulb, Download, ZoomIn, Package, ToggleLeft, ToggleRight, RefreshCw, Edit3, FlaskConical } from "lucide-react";
 import clsx from "clsx";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
@@ -146,6 +146,66 @@ const generateImage = async (image: string, product: string, pattern_desc: strin
     return { result: imageUrl };
 };
 
+const replaceImageSubject = async (originalImageUrl: string, newSubjectUrl: string, product: string, customPrompt?: string) => {
+    const client = getClient();
+    
+    const systemInstruction = `
+      你是一位专业的图像编辑专家。
+      任务：将图1（商品图）中产品上的图案主体，替换为图2中的主体。
+      
+      规则：
+      1. 基准图：图1是生成的商品图。你必须严格保持其构图、背景、光影和产品角度不变。
+      2. 新主体：图2是新的主体（人物/宠物）。
+      3. 操作：将图1中 ${product} 上的主要图形/图案主体，替换为图2中的主体。
+      4. 风格：新主体必须采用与图1中图案完全相同的艺术风格。
+      5. 输出：一张逼真的商品摄影图，除了图案主体改变外，其他与图1完全一致。
+      6. 仅返回图片 URL。
+    `;
+
+    const userPrompt = customPrompt || `
+      参考图1：当前商品图。
+      参考图2：新主体。
+      
+      编辑图1：将 ${product} 上的图案主体替换为图2中的主体。
+      保持背景场景和产品形态完全一致。
+      匹配原图案的艺术风格。
+    `;
+
+    const response = await client.chat.completions.create({
+      model: "gemini-3-pro-image-preview",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: systemInstruction },
+            { type: "text", text: userPrompt },
+            { type: "image_url", image_url: { url: originalImageUrl } }, // Image 1
+            { type: "image_url", image_url: { url: newSubjectUrl } },    // Image 2
+          ],
+        },
+      ],
+    });
+
+    const content = response.choices[0].message.content || "";
+    let imageUrl = null;
+      
+    const markdownMatch = content.match(/!\[.*?\]\((https?:\/\/.*?|data:image\/.*?)\)/);
+    const dataUriMatch = content.match(/(data:image\/[a-zA-Z]*;base64,[^\s)]+)/);
+    const urlMatch = content.match(/(https?:\/\/[^\s)]+)/);
+
+    if (markdownMatch) imageUrl = markdownMatch[1];
+    else if (dataUriMatch) imageUrl = dataUriMatch[1];
+    else if (urlMatch) imageUrl = urlMatch[1];
+    
+    if (imageUrl && !imageUrl.startsWith('data:')) {
+        imageUrl = imageUrl.replace(/[).,;]+$/, "").trim();
+    }
+
+    if (!imageUrl) throw new Error("No image URL found in response");
+
+    return { result: imageUrl };
+};
+
 // Default products
 const DEFAULT_PRODUCTS = [
   { id: "1", name: "Black Hoodie", enabled: true /* inspirationImage: null */ },
@@ -167,21 +227,38 @@ type SubjectImage = {
   name: string;
 };
 
+type ImageVersion = {
+  url: string;
+  label: string;
+  timestamp: number;
+};
+
 type GenerationResult = {
   subjectName: string;
   product: string;
   prompt: string;
-  imageUrl?: string;
+  
+  // Versioning
+  versions: ImageVersion[];
+  currentVersionIndex: number;
+
   loading: boolean;
+  replacementLoading?: boolean; // Loading state for replacement operation
   error?: string;
   statusText?: string;
   pattern_description?: string;
   scene_description?: string;
-  fileIndex: number; // Added fileIndex for per-subject numbering
+  fileIndex: number;
+
+  // Local UI State for Replacement
+  isReplacing?: boolean; 
+  newSubjectImage?: string | null;
+  replacePrompt?: string; // Custom prompt for replacement
+  showPromptEditor?: boolean; // Toggle for prompt editor
 };
 
 export default function Home() {
-  const [images, setImages] = useState<SubjectImage[]>([]); // Changed from single image to array
+  const [images, setImages] = useState<SubjectImage[]>([]);
   const [designTheme, setDesignTheme] = useState<string>(""); 
   const [products, setProducts] = useState<ProductItem[]>(DEFAULT_PRODUCTS);
   const [status, setStatus] = useState<"idle" | "analyzing" | "generating" | "done">("idle");
@@ -189,9 +266,13 @@ export default function Home() {
   const [progress, setProgress] = useState<number>(0);
   const [results, setResults] = useState<GenerationResult[]>([]);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  
   const [isLoaded, setIsLoaded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null); // For cancelling requests
+  const replaceInputRef = useRef<HTMLInputElement>(null);
+  const [activeReplaceIndex, setActiveReplaceIndex] = useState<number | null>(null);
+
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Cleanup on unmount or refresh
   useEffect(() => {
@@ -423,7 +504,9 @@ export default function Home() {
                     scene_description: "",
                     loading: true,
                     statusText: "Waiting...",
-                    fileIndex: subjectFileIndex // Store 0-based index
+                    fileIndex: subjectFileIndex, // Store 0-based index
+                    versions: [],
+                    currentVersionIndex: -1
                 });
                 resultIndex++;
                 subjectFileIndex++;
@@ -521,7 +604,9 @@ export default function Home() {
                     
                     updateItemState({
                         loading: false,
-                        imageUrl: genData.result || undefined,
+                        // imageUrl: genData.result || undefined, // Deprecated
+                        versions: genData.result ? [{ url: genData.result, label: "Original", timestamp: Date.now() }] : [],
+                        currentVersionIndex: genData.result ? 0 : -1,
                         error: undefined,
                         statusText: "Done"
                     });
@@ -586,20 +671,6 @@ export default function Home() {
       return (index + 2).toString().padStart(4, '0');
   };
 
-  const handleDownload = async (url: string, filename: string) => {
-      try {
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = filename;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-      } catch (error) {
-          console.error("Download failed", error);
-          alert("下载失败，请重试");
-      }
-  };
-
   const handleDownloadAll = async () => {
       if (results.length === 0) return;
       
@@ -608,11 +679,13 @@ export default function Home() {
       
       if (!mainFolder) return;
 
-      const validResults = results.filter(r => r.imageUrl);
+      // Filter results that have at least one version with a URL
+      const validResults = results.filter(r => r.versions && r.versions.length > 0 && r.versions[r.currentVersionIndex]?.url);
       
       for (let i = 0; i < validResults.length; i++) {
           const result = validResults[i];
-          if (result.imageUrl) {
+          const currentVersion = result.versions[result.currentVersionIndex];
+          if (currentVersion?.url) {
               // Structure: MainFolder / SubjectName / Product_Index.jpg
               // Sanitize folder names, allowing unicode characters but removing dangerous filesystem chars
               let safeSubjectName = result.subjectName.replace(/[\\/:*?"<>|]/g, '_').trim();
@@ -632,11 +705,11 @@ export default function Home() {
                       let data: Blob | string = "";
                       let isBase64 = false;
 
-                      if (result.imageUrl.startsWith("data:")) {
-                          data = result.imageUrl.split(",")[1];
+                      if (currentVersion.url.startsWith("data:")) {
+                          data = currentVersion.url.split(",")[1];
                           isBase64 = true;
                       } else {
-                          const response = await fetch(result.imageUrl);
+                          const response = await fetch(currentVersion.url);
                           data = await response.blob();
                           isBase64 = false;
                       }
@@ -660,6 +733,282 @@ export default function Home() {
       } catch (err) {
           console.error("Failed to generate zip", err);
           alert("打包下载失败，请重试");
+      }
+  };
+
+  const handleDownload = async (url: string, filename: string) => {
+      try {
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+      } catch (error) {
+          console.error("Download failed", error);
+          alert("下载失败，请重试");
+      }
+  };
+
+  const toggleReplaceUI = (index: number) => {
+      setResults(prev => {
+          const next = [...prev];
+          const item = next[index];
+          
+          // Initialize default prompt if opening and not set
+          let defaultPrompt = item.replacePrompt;
+          if (!item.isReplacing && !defaultPrompt) {
+              defaultPrompt = `参考图1：当前商品图。
+参考图2：新主体。
+
+任务：将图1商品（${item.product}）上的图案主体，替换为图2中的人物/宠物。
+要求：
+1. 保持背景场景、光影、构图完全不变。
+2. 保持原图案的艺术风格。
+3. 仅替换图案中的主体内容。`;
+          }
+
+          next[index] = { 
+              ...item, 
+              isReplacing: !item.isReplacing,
+              newSubjectImage: null,
+              replacePrompt: defaultPrompt
+          };
+          return next;
+      });
+  };
+
+  const updateReplacePrompt = (index: number, prompt: string) => {
+      setResults(prev => {
+          const next = [...prev];
+          next[index] = { ...next[index], replacePrompt: prompt };
+          return next;
+      });
+  };
+
+  const togglePromptEditor = (index: number) => {
+      setResults(prev => {
+          const next = [...prev];
+          next[index] = { ...next[index], showPromptEditor: !next[index].showPromptEditor };
+          return next;
+      });
+  };
+
+  const triggerReplaceUpload = (index: number) => {
+      setActiveReplaceIndex(index);
+      // Small timeout to ensure state update before click (though ref doesn't depend on state)
+      setTimeout(() => replaceInputRef.current?.click(), 0);
+  };
+
+  const handleReplaceFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const idx = activeReplaceIndex;
+      if (idx === null) return;
+      
+      const file = e.target.files?.[0];
+      if (file) {
+          const resized = await resizeImage(file);
+          setResults(prev => {
+              const next = [...prev];
+              next[idx] = { ...next[idx], newSubjectImage: resized };
+              return next;
+          });
+      }
+      // Reset input
+      if (replaceInputRef.current) replaceInputRef.current.value = '';
+  };
+
+  const executeCardReplace = async (index: number) => {
+      const item = results[index];
+      if (!item || !item.newSubjectImage) return;
+
+      // Set loading state
+      setResults(prev => {
+          const next = [...prev];
+          next[index] = { 
+              ...next[index], 
+              replacementLoading: true,
+              statusText: "Replacing Subject..." 
+          };
+          return next;
+      });
+
+      try {
+          // Use current visible version as base? Or always use original?
+          // Let's use the *current visible version* as base if it exists, otherwise first version.
+          const currentVer = item.versions[item.currentVersionIndex];
+          if (!currentVer) throw new Error("No base image found");
+
+          const genData = await replaceImageSubject(
+              currentVer.url, 
+              item.newSubjectImage, 
+              item.product,
+              item.replacePrompt
+          );
+
+          if (!genData.result) throw new Error("No result from API");
+
+          // Update Result: Add new version and switch to it
+          setResults(prev => {
+              const next = [...prev];
+              const item = next[index];
+              
+              // Create deep copy of versions to ensure re-render
+              const newVersions = [
+                  ...item.versions, 
+                  { 
+                      url: genData.result!, 
+                      label: `Replaced ${item.versions.length}`, 
+                      timestamp: Date.now() 
+                  }
+              ];
+
+              next[index] = {
+                  ...item,
+                  replacementLoading: false,
+                  statusText: "Subject Replaced",
+                  isReplacing: false,
+                  newSubjectImage: null,
+                  versions: newVersions,
+                  currentVersionIndex: newVersions.length - 1
+              };
+              
+              console.log("Updated Item:", next[index]); // Debug log
+              return next;
+          });
+
+      } catch (error: any) {
+          console.error("Replace failed", error);
+          setResults(prev => {
+              const next = [...prev];
+              next[index] = { 
+                  ...next[index], 
+                  replacementLoading: false, 
+                  error: "Replace Failed",
+                  statusText: "Failed"
+              };
+              return next;
+          });
+          alert("替换主体失败: " + (error.message || "Unknown error"));
+      }
+  };
+
+  const toggleVersion = (resultIndex: number, versionIndex: number) => {
+      setResults(prev => {
+          const next = [...prev];
+          next[resultIndex] = { ...next[resultIndex], currentVersionIndex: versionIndex };
+          return next;
+      });
+  };
+
+  // Test images paths (put your test images in public/test-images/)
+  const TEST_IMAGES = [
+      "/test-images/test1.jpg",
+      "/test-images/test2.jpg",
+      "/test-images/test3.jpg",
+      "/test-images/test4.jpg",
+  ];
+
+  // Batch test: use all test images to replace subject on a single result card
+  const runBatchTest = async (index: number) => {
+      const item = results[index];
+      if (!item) return;
+
+      const currentVer = item.versions[item.currentVersionIndex];
+      if (!currentVer) {
+          alert("没有基准图片可供测试");
+          return;
+      }
+
+      // Confirm
+      if (!confirm(`将使用 ${TEST_IMAGES.length} 张测试图片对该商品进行批量替换测试，是否继续？`)) {
+          return;
+      }
+
+      // Set loading state
+      setResults(prev => {
+          const next = [...prev];
+          next[index] = { 
+              ...next[index], 
+              replacementLoading: true,
+              statusText: `批量测试中... (0/${TEST_IMAGES.length})` 
+          };
+          return next;
+      });
+
+      let successCount = 0;
+      const newVersions: { url: string; label: string; timestamp: number }[] = [];
+
+      // Process test images sequentially to avoid rate limits
+      for (let i = 0; i < TEST_IMAGES.length; i++) {
+          const testImagePath = TEST_IMAGES[i];
+          
+          try {
+              // Update status
+              setResults(prev => {
+                  const next = [...prev];
+                  next[index] = { 
+                      ...next[index], 
+                      statusText: `批量测试中... (${i + 1}/${TEST_IMAGES.length})` 
+                  };
+                  return next;
+              });
+
+              // Fetch test image and convert to base64
+              const response = await fetch(testImagePath);
+              if (!response.ok) {
+                  console.warn(`Test image not found: ${testImagePath}`);
+                  continue;
+              }
+              const blob = await response.blob();
+              const testImageBase64 = await new Promise<string>((resolve) => {
+                  const reader = new FileReader();
+                  reader.onloadend = () => resolve(reader.result as string);
+                  reader.readAsDataURL(blob);
+              });
+
+              // Call replace API
+              const genData = await replaceImageSubject(
+                  currentVer.url,
+                  testImageBase64,
+                  item.product,
+                  item.replacePrompt
+              );
+
+              if (genData.result) {
+                  newVersions.push({
+                      url: genData.result,
+                      label: `Test ${i + 1}`,
+                      timestamp: Date.now()
+                  });
+                  successCount++;
+              }
+          } catch (error) {
+              console.error(`Test image ${i + 1} failed:`, error);
+          }
+      }
+
+      // Update result with all new versions
+      setResults(prev => {
+          const next = [...prev];
+          const updatedItem = next[index];
+          
+          next[index] = {
+              ...updatedItem,
+              replacementLoading: false,
+              statusText: `测试完成 (${successCount}/${TEST_IMAGES.length})`,
+              versions: [...updatedItem.versions, ...newVersions],
+              currentVersionIndex: newVersions.length > 0 
+                  ? updatedItem.versions.length + newVersions.length - 1 
+                  : updatedItem.currentVersionIndex
+          };
+          
+          return next;
+      });
+
+      if (successCount === 0) {
+          alert("批量测试失败，请确保 public/test-images/ 文件夹下有 test1.jpg ~ test4.jpg");
+      } else {
+          alert(`批量测试完成！成功生成 ${successCount} 张图片`);
       }
   };
 
@@ -897,6 +1246,15 @@ export default function Home() {
           </div>
         </section>
 
+        {/* Hidden Input for Replace Subject */}
+        <input 
+            type="file" 
+            ref={replaceInputRef} 
+            onChange={handleReplaceFileChange} 
+            className="hidden" 
+            accept="image/*"
+        />
+
         {/* Image Modal */}
         <AnimatePresence>
             {selectedImage && (
@@ -926,6 +1284,8 @@ export default function Home() {
             )}
         </AnimatePresence>
 
+        {/* Replace Subject Modal - REMOVED */}
+
         {/* Results Grid */}
         <section ref={resultsRef} className="pb-24">
             {status === "done" && results.length > 0 && (
@@ -945,17 +1305,24 @@ export default function Home() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2 gap-8">
                 <AnimatePresence>
-                    {results.map((result, idx) => (
+                    {results.map((result, idx) => {
+                        const hasVersions = result.versions && result.versions.length > 0;
+                        const currentVersion = hasVersions 
+                            ? (result.versions[result.currentVersionIndex] || result.versions[result.versions.length - 1])
+                            : null;
+                        
+                        return (
                         <motion.div
                             key={idx}
                             initial={{ opacity: 0, y: 30 }}
                             animate={{ opacity: 1, y: 0 }}
                             exit={{ opacity: 0 }}
                             transition={{ delay: idx * 0.05, type: "spring", stiffness: 100 }}
-                            className="bg-white dark:bg-neutral-800 rounded-3xl overflow-hidden shadow-xl hover:shadow-2xl transition-all duration-500 group border border-neutral-100 dark:border-neutral-700"
+                            className="bg-white dark:bg-neutral-800 rounded-3xl overflow-hidden shadow-xl hover:shadow-2xl transition-all duration-500 group border border-neutral-100 dark:border-neutral-700 flex flex-col"
                         >
+                            {/* Image Area */}
                             <div className="h-[500px] bg-neutral-100 dark:bg-neutral-700/50 relative flex items-center justify-center overflow-hidden">
-                                {result.loading ? (
+                                {result.loading || result.replacementLoading ? (
                                     <div className="flex flex-col items-center gap-4 p-6 text-center">
                                         <div className="relative">
                                             <div className="w-16 h-16 border-4 border-violet-200 border-t-violet-600 rounded-full animate-spin"></div>
@@ -963,21 +1330,63 @@ export default function Home() {
                                                 <div className="w-2 h-2 bg-violet-600 rounded-full"></div>
                                             </div>
                                         </div>
-                                        <span className="text-sm font-medium text-violet-600 dark:text-violet-400 animate-pulse tracking-wide">{result.statusText || "Processing..."}</span>
+                                        <span className="text-sm font-medium text-violet-600 dark:text-violet-400 animate-pulse tracking-wide">
+                                            {result.statusText || "Processing..."}
+                                        </span>
                                         <p className="text-xs text-neutral-400 mt-1">{result.subjectName}</p>
                                     </div>
-                                ) : result.imageUrl ? (
+                                ) : result.isReplacing ? (
+                                    // In-Card Replacement UI
+                                    <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-neutral-50 dark:bg-neutral-800/50 backdrop-blur-sm z-20">
+                                        <div 
+                                            onClick={() => triggerReplaceUpload(idx)}
+                                            className={clsx(
+                                                "w-full h-64 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all duration-300 relative overflow-hidden group/upload",
+                                                result.newSubjectImage ? "border-violet-500 bg-white dark:bg-neutral-900" : "border-neutral-300 hover:border-violet-400 hover:bg-white dark:border-neutral-600 dark:hover:bg-neutral-700/50"
+                                            )}
+                                        >
+                                            {result.newSubjectImage ? (
+                                                <img src={result.newSubjectImage} alt="New Subject" className="w-full h-full object-contain p-4" />
+                                            ) : (
+                                                <div className="flex flex-col items-center gap-3 text-neutral-400 group-hover/upload:text-violet-500 transition-colors">
+                                                    <Upload className="w-10 h-10" />
+                                                    <span className="text-sm font-medium">点击上传新主体</span>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="flex gap-3 w-full mt-6">
+                                            <button
+                                                onClick={() => toggleReplaceUI(idx)}
+                                                className="flex-1 py-3 rounded-xl border border-neutral-300 dark:border-neutral-600 text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-colors"
+                                            >
+                                                取消
+                                            </button>
+                                            <button
+                                                onClick={() => executeCardReplace(idx)}
+                                                disabled={!result.newSubjectImage}
+                                                className="flex-1 py-3 rounded-xl bg-violet-600 text-white font-bold hover:bg-violet-700 shadow-lg shadow-violet-500/20 disabled:opacity-50 disabled:shadow-none transition-all"
+                                            >
+                                                确认替换
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : currentVersion ? (
+                                    // Image Display
                                     <>
                                         <img 
-                                            src={result.imageUrl} 
+                                            src={currentVersion.url} 
                                             alt={result.product} 
                                             className="w-full h-full object-contain transition-transform duration-700 group-hover:scale-105 cursor-zoom-in p-2" 
-                                            onClick={() => setSelectedImage(result.imageUrl || null)}
+                                            onClick={() => setSelectedImage(currentVersion.url || null)}
                                         />
-                                        {/* Name Tag */}
-                                        <div className="absolute top-6 left-6 bg-white/90 dark:bg-black/80 backdrop-blur-md text-neutral-900 dark:text-white px-4 py-1.5 rounded-full text-sm font-mono font-medium shadow-lg">
-                                            {getFormattedName(result.fileIndex)}
-                                        </div>
+                                        {/* Version Badge */}
+                                        {hasVersions && (
+                                            <div className="absolute top-6 left-6 bg-black/60 backdrop-blur-md text-white px-3 py-1 rounded-full text-xs font-medium shadow-lg border border-white/10">
+                                                {currentVersion.label}
+                                            </div>
+                                        )}
+                                        {/* Subject Name Badge */}
                                         <div className="absolute top-6 right-6 bg-violet-500/90 backdrop-blur-md text-white px-3 py-1 rounded-full text-xs font-medium shadow-lg">
                                             {result.subjectName}
                                         </div>
@@ -991,34 +1400,127 @@ export default function Home() {
                                     </div>
                                 )}
                             </div>
-                            <div className="p-6 bg-white dark:bg-neutral-800 relative z-10">
-                                <div className="flex justify-between items-center mb-4">
+
+                            {/* Content Area */}
+                            <div className="p-6 bg-white dark:bg-neutral-800 relative z-10 flex-1 flex flex-col">
+                                <div className="flex justify-between items-start mb-4">
                                     <div>
                                         <h3 className="font-bold text-xl text-neutral-800 dark:text-white group-hover:text-violet-600 transition-colors">{result.product}</h3>
-                                        <p className="text-xs text-neutral-400 mt-1">Subject: {result.subjectName}</p>
+                                        <div className="flex items-center gap-2 mt-1">
+                                            <span className="text-xs font-mono text-neutral-400 bg-neutral-100 dark:bg-neutral-700 px-2 py-0.5 rounded-md">{getFormattedName(result.fileIndex)}</span>
+                                        </div>
                                     </div>
-                                    <div className="flex items-center gap-3">
-                                        <span className="text-xs font-mono text-neutral-400 bg-neutral-100 dark:bg-neutral-700 px-2 py-1 rounded-md">{getFormattedName(result.fileIndex)}</span>
-                                        {result.imageUrl && (
+                                    
+                                    {/* Actions */}
+                                    {currentVersion && (
+                                        <div className="flex items-center gap-2">
                                             <button 
-                                                onClick={() => handleDownload(result.imageUrl!, `${result.subjectName}_${result.product}_${getFormattedName(result.fileIndex)}.jpg`)}
-                                                className="text-violet-600 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300 transition-colors p-1"
-                                                title="Download Image"
+                                                onClick={() => togglePromptEditor(idx)}
+                                                className={clsx(
+                                                    "p-2 rounded-full transition-all",
+                                                    result.showPromptEditor 
+                                                        ? "bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400" 
+                                                        : "text-neutral-400 hover:text-amber-600 hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                                                )}
+                                                title="编辑替换 Prompt"
+                                            >
+                                                <Edit3 className="w-5 h-5" />
+                                            </button>
+                                            <button 
+                                                onClick={() => runBatchTest(idx)}
+                                                disabled={result.replacementLoading}
+                                                className="p-2 rounded-full text-neutral-400 hover:text-green-600 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-all disabled:opacity-50"
+                                                title="批量测试 (使用测试图片)"
+                                            >
+                                                <FlaskConical className="w-5 h-5" />
+                                            </button>
+                                            <button 
+                                                onClick={() => toggleReplaceUI(idx)}
+                                                className={clsx(
+                                                    "p-2 rounded-full transition-all",
+                                                    result.isReplacing 
+                                                        ? "bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400" 
+                                                        : "text-neutral-400 hover:text-violet-600 hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                                                )}
+                                                title="替换主体"
+                                            >
+                                                <RefreshCw className="w-5 h-5" />
+                                            </button>
+                                            <button 
+                                                onClick={() => handleDownload(currentVersion.url, `${result.subjectName}_${result.product}_${currentVersion.label}.jpg`)}
+                                                className="p-2 rounded-full text-neutral-400 hover:text-violet-600 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-all"
+                                                title="下载图片"
                                             >
                                                 <Download className="w-5 h-5" />
                                             </button>
-                                        )}
-                                    </div>
+                                        </div>
+                                    )}
                                 </div>
-                                <div className="text-sm text-neutral-600 dark:text-neutral-300 bg-neutral-50 dark:bg-neutral-700/30 p-4 rounded-xl border border-neutral-100 dark:border-neutral-700 max-h-32 overflow-y-auto custom-scrollbar">
+
+                                {/* Version Switcher (Thumbnails) */}
+                                {hasVersions && result.versions.length > 1 && (
+                                    <div className="flex gap-2 mb-4 overflow-x-auto py-2 scrollbar-none">
+                                        {result.versions.map((ver, vIdx) => (
+                                            <div 
+                                                key={vIdx}
+                                                onClick={() => toggleVersion(idx, vIdx)}
+                                                className={clsx(
+                                                    "w-12 h-12 rounded-lg border-2 overflow-hidden cursor-pointer flex-shrink-0 transition-all",
+                                                    result.currentVersionIndex === vIdx 
+                                                        ? "border-violet-500 shadow-md scale-105" 
+                                                        : "border-transparent opacity-60 hover:opacity-100 hover:border-neutral-300"
+                                                )}
+                                                title={ver.label}
+                                            >
+                                                <img src={ver.url} className="w-full h-full object-cover" alt={ver.label} />
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                <div className="text-sm text-neutral-600 dark:text-neutral-300 bg-neutral-50 dark:bg-neutral-700/30 p-4 rounded-xl border border-neutral-100 dark:border-neutral-700 max-h-32 overflow-y-auto custom-scrollbar mt-auto">
                                     <span className="font-semibold text-xs text-violet-500 uppercase tracking-wider mb-2 block flex items-center gap-1">
                                         <Lightbulb className="w-3 h-3" /> AI Prompt:
                                     </span>
                                     <p className="leading-relaxed">{result.prompt}</p>
                                 </div>
+
+                                {/* Independent Prompt Editor */}
+                                {result.showPromptEditor && (
+                                    <div className="mt-4 p-4 bg-amber-50 dark:bg-amber-900/20 rounded-xl border border-amber-200 dark:border-amber-800">
+                                        <div className="flex items-center justify-between mb-3">
+                                            <span className="text-xs font-semibold text-amber-700 dark:text-amber-400 uppercase tracking-wider flex items-center gap-1">
+                                                <Edit3 className="w-3 h-3" /> 自定义替换指令
+                                            </span>
+                                            <button
+                                                onClick={() => togglePromptEditor(idx)}
+                                                className="text-neutral-400 hover:text-neutral-600 transition-colors"
+                                            >
+                                                <X className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                        <textarea
+                                            value={result.replacePrompt || `参考图1：当前商品图。
+参考图2：新主体。
+
+任务：将图1商品（${result.product}）上的图案主体，替换为图2中的人物/宠物。
+要求：
+1. 保持背景场景、光影、构图完全不变。
+2. 保持原图案的艺术风格。
+3. 仅替换图案中的主体内容。`}
+                                            onChange={(e) => updateReplacePrompt(idx, e.target.value)}
+                                            className="w-full bg-white dark:bg-neutral-900 rounded-lg p-3 text-sm border border-amber-200 dark:border-amber-700 focus:border-amber-500 outline-none transition-all min-h-[120px] resize-y"
+                                            placeholder="输入自定义替换 Prompt..."
+                                        />
+                                        <p className="text-xs text-amber-600 dark:text-amber-500 mt-2">
+                                            💡 此 Prompt 将用于"替换主体"和"批量测试"操作
+                                        </p>
+                                    </div>
+                                )}
                             </div>
                         </motion.div>
-                    ))}
+                    );
+                    })}
                 </AnimatePresence>
             </div>
         </section>
