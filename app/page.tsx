@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Upload, Image as ImageIcon, Loader2, X, Plus, Settings, Lightbulb, Download, ZoomIn, Package, ToggleLeft, ToggleRight, RefreshCw, Edit3, FlaskConical } from "lucide-react";
+import { Upload, Image as ImageIcon, Loader2, X, Plus, Settings, Lightbulb, Download, ZoomIn, Package, ToggleLeft, ToggleRight, RefreshCw, Edit3, FlaskConical, Sparkles } from "lucide-react";
 import clsx from "clsx";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
@@ -171,6 +171,75 @@ const replaceImageSubject = async (originalImageUrl: string, newSubjectUrl: stri
       编辑图1：将 ${product} 上的图案主体替换为图2中的主体。
       保持背景场景和产品形态完全一致。
       匹配原图案的艺术风格。
+    `;
+
+    const response = await client.chat.completions.create({
+      model: "gemini-3-pro-image-preview",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: systemInstruction },
+            { type: "text", text: userPrompt },
+            { type: "image_url", image_url: { url: originalImageUrl } }, // Image 1
+            { type: "image_url", image_url: { url: newSubjectUrl } },    // Image 2
+          ],
+        },
+      ],
+    });
+
+    const content = response.choices[0].message.content || "";
+    let imageUrl = null;
+      
+    const markdownMatch = content.match(/!\[.*?\]\((https?:\/\/.*?|data:image\/.*?)\)/);
+    const dataUriMatch = content.match(/(data:image\/[a-zA-Z]*;base64,[^\s)]+)/);
+    const urlMatch = content.match(/(https?:\/\/[^\s)]+)/);
+
+    if (markdownMatch) imageUrl = markdownMatch[1];
+    else if (dataUriMatch) imageUrl = dataUriMatch[1];
+    else if (urlMatch) imageUrl = urlMatch[1];
+    
+    if (imageUrl && !imageUrl.startsWith('data:')) {
+        imageUrl = imageUrl.replace(/[).,;]+$/, "").trim();
+    }
+
+    if (!imageUrl) throw new Error("No image URL found in response");
+
+    return { result: imageUrl };
+};
+
+// Replace subject AND adapt scene to match new subject
+const replaceImageSubjectWithScene = async (originalImageUrl: string, newSubjectUrl: string, product: string) => {
+    const client = getClient();
+    
+    const systemInstruction = `
+      你是一位专业的图像编辑专家。
+      任务：将图1（商品图）中产品上的图案主体替换为图2中的主体，同时根据新主体调整商品的背景场景。
+      
+      规则：
+      1. 基准图：图1是生成的商品图，参考其商品类型、构图和光影风格。
+      2. 新主体：图2是新的主体（人物/宠物）。
+      3. 主体操作：将图1中 ${product} 上的主要图形/图案主体，替换为图2中的主体。
+      4. 场景操作：根据图2中主体的特点（如宠物品种、人物风格等），重新设计一个与该主体更契合的高端商品场景。
+         - 例如：如果新主体是金毛犬，场景可以是温馨的客厅或户外草地；
+         - 如果新主体是猫咪，场景可以是书房或窗台等；
+         - 场景要能突出主体特点，营造情感共鸣。
+      5. 风格：新主体必须采用与图1中图案相似的艺术风格（如卡通、写实等）。
+      6. 输出：一张逼真的商品摄影图，商品 ${product} 为主体，场景与新主体特点契合。
+      7. 比例：3:4（竖版）。
+      8. 分辨率：2K（高清）。
+      9. 仅返回图片 URL。
+    `;
+
+    const userPrompt = `
+      参考图1：当前商品图（参考商品类型和图案风格）。
+      参考图2：新主体。
+      
+      任务：
+      1. 将 ${product} 上的图案主体替换为图2中的主体
+      2. 根据图2中主体的特点，重新设计一个更契合的商品场景
+      3. 保持商品类型和图案艺术风格不变
+      4. 场景要高端、有氛围感，能与新主体产生情感共鸣
     `;
 
     const response = await client.chat.completions.create({
@@ -1055,6 +1124,133 @@ export default function Home() {
       }
   };
 
+  // Batch test WITH SCENE ADAPTATION: replace subject AND adjust scene to match new subject
+  const runBatchTestWithScene = async (index: number) => {
+      const item = results[index];
+      if (!item) return;
+
+      const currentVer = item.versions[item.currentVersionIndex];
+      if (!currentVer) {
+          alert("没有基准图片可供测试");
+          return;
+      }
+
+      // Confirm
+      if (!confirm(`将使用 ${TEST_IMAGES.length} 张测试图片进行「场景测试」：替换主体的同时，根据新主体调整场景。是否继续？`)) {
+          return;
+      }
+
+      // Create pending versions for loading thumbnails
+      const pendingIds = TEST_IMAGES.map((_, i) => `scene-test-${Date.now()}-${i}`);
+      const initialPendingVersions: PendingVersion[] = TEST_IMAGES.map((_, i) => ({
+          id: pendingIds[i],
+          label: `Scene ${i + 1}`,
+          loading: true
+      }));
+
+      // Add pending versions to show loading thumbnails
+      setResults(prev => {
+          const next = [...prev];
+          next[index] = { 
+              ...next[index], 
+              pendingVersions: [...(next[index].pendingVersions || []), ...initialPendingVersions],
+              statusText: `场景测试中... (0/${TEST_IMAGES.length})`
+          };
+          return next;
+      });
+
+      let successCount = 0;
+
+      // Process all test images in PARALLEL
+      const promises = TEST_IMAGES.map(async (testImagePath, i) => {
+          const pendingId = pendingIds[i];
+          
+          try {
+              // Fetch test image and convert to base64
+              const response = await fetch(testImagePath);
+              if (!response.ok) {
+                  throw new Error(`Test image not found: ${testImagePath}`);
+              }
+              const blob = await response.blob();
+              const testImageBase64 = await new Promise<string>((resolve) => {
+                  const reader = new FileReader();
+                  reader.onloadend = () => resolve(reader.result as string);
+                  reader.readAsDataURL(blob);
+              });
+
+              // Call replace WITH SCENE API
+              const genData = await replaceImageSubjectWithScene(
+                  currentVer.url,
+                  testImageBase64,
+                  item.product
+              );
+
+              if (genData.result) {
+                  // Success: Remove pending, add real version
+                  setResults(prev => {
+                      const next = [...prev];
+                      const updatedItem = next[index];
+                      const newVersion = {
+                          url: genData.result!,
+                          label: `Scene ${i + 1}`,
+                          timestamp: Date.now()
+                      };
+                      
+                      next[index] = {
+                          ...updatedItem,
+                          pendingVersions: updatedItem.pendingVersions.filter(p => p.id !== pendingId),
+                          versions: [...updatedItem.versions, newVersion],
+                          currentVersionIndex: updatedItem.versions.length, // Switch to new
+                          statusText: `场景测试中...`
+                      };
+                      return next;
+                  });
+                  successCount++;
+                  return true;
+              }
+              throw new Error("No result");
+          } catch (error) {
+              console.error(`Scene test image ${i + 1} failed:`, error);
+              // Mark pending as error
+              setResults(prev => {
+                  const next = [...prev];
+                  const updatedItem = next[index];
+                  next[index] = {
+                      ...updatedItem,
+                      pendingVersions: updatedItem.pendingVersions.map(p => 
+                          p.id === pendingId ? { ...p, loading: false, error: "Failed" } : p
+                      )
+                  };
+                  return next;
+              });
+              return false;
+          }
+      });
+
+      // Wait for all to complete
+      await Promise.all(promises);
+
+      // Final cleanup: remove any remaining pending versions and update status
+      setResults(prev => {
+          const next = [...prev];
+          const updatedItem = next[index];
+          
+          next[index] = {
+              ...updatedItem,
+              pendingVersions: [], // Clear all pending
+              statusText: `场景测试完成 (${successCount}/${TEST_IMAGES.length})`
+          };
+          
+          return next;
+      });
+
+      if (successCount === 0) {
+          alert("场景测试失败，请确保 public/test-images/ 文件夹下有 test1.jpg ~ test4.jpg");
+      } else {
+          alert(`场景测试完成！成功生成 ${successCount} 张图片`);
+      }
+  };
+
   if (!isLoaded) {
       return (
           <div className="min-h-screen bg-neutral-50 dark:bg-neutral-900 flex items-center justify-center">
@@ -1473,9 +1669,17 @@ export default function Home() {
                                                 onClick={() => runBatchTest(idx)}
                                                 disabled={result.pendingVersions && result.pendingVersions.length > 0}
                                                 className="p-2 rounded-full text-neutral-400 hover:text-green-600 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-all disabled:opacity-50"
-                                                title="批量测试 (使用测试图片)"
+                                                title="批量测试 (只换主体)"
                                             >
                                                 <FlaskConical className="w-5 h-5" />
+                                            </button>
+                                            <button 
+                                                onClick={() => runBatchTestWithScene(idx)}
+                                                disabled={result.pendingVersions && result.pendingVersions.length > 0}
+                                                className="p-2 rounded-full text-neutral-400 hover:text-cyan-600 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-all disabled:opacity-50"
+                                                title="场景测试 (换主体+换场景)"
+                                            >
+                                                <Sparkles className="w-5 h-5" />
                                             </button>
                                             <button 
                                                 onClick={() => toggleReplaceUI(idx)}
