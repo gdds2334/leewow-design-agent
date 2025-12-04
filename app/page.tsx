@@ -98,7 +98,7 @@ const generateImage = async (image: string, product: string, pattern_desc: strin
       3. Reference Style: Mimic provided style if any.
       4. Subject Integration: Blend the subject seamlessly.
       5. Output: Clean, professional product shot.
-      6. Aspect Ratio: 9:16 (Portrait).
+      6. Aspect Ratio: 3:4 (Portrait).
       7. Resolution: 2K (High Definition).
       8. RETURN ONLY THE URL.
     `;
@@ -159,7 +159,9 @@ const replaceImageSubject = async (originalImageUrl: string, newSubjectUrl: stri
       3. 操作：将图1中 ${product} 上的主要图形/图案主体，替换为图2中的主体。
       4. 风格：新主体必须采用与图1中图案完全相同的艺术风格。
       5. 输出：一张逼真的商品摄影图，除了图案主体改变外，其他与图1完全一致。
-      6. 仅返回图片 URL。
+      6. 比例：3:4（竖版）。
+      7. 分辨率：2K（高清）。
+      8. 仅返回图片 URL。
     `;
 
     const userPrompt = customPrompt || `
@@ -233,6 +235,13 @@ type ImageVersion = {
   timestamp: number;
 };
 
+type PendingVersion = {
+  id: string;
+  label: string;
+  loading: boolean;
+  error?: string;
+};
+
 type GenerationResult = {
   subjectName: string;
   product: string;
@@ -241,6 +250,7 @@ type GenerationResult = {
   // Versioning
   versions: ImageVersion[];
   currentVersionIndex: number;
+  pendingVersions: PendingVersion[]; // Loading placeholders for in-progress generations
 
   loading: boolean;
   replacementLoading?: boolean; // Loading state for replacement operation
@@ -506,7 +516,8 @@ export default function Home() {
                     statusText: "Waiting...",
                     fileIndex: subjectFileIndex, // Store 0-based index
                     versions: [],
-                    currentVersionIndex: -1
+                    currentVersionIndex: -1,
+                    pendingVersions: []
                 });
                 resultIndex++;
                 subjectFileIndex++;
@@ -821,23 +832,34 @@ export default function Home() {
       const item = results[index];
       if (!item || !item.newSubjectImage) return;
 
-      // Set loading state
+      const currentVer = item.versions[item.currentVersionIndex];
+      if (!currentVer) {
+          alert("没有基准图片");
+          return;
+      }
+
+      // Create pending version for loading thumbnail
+      const pendingId = `replace-${Date.now()}`;
+      const pendingVersion: PendingVersion = {
+          id: pendingId,
+          label: `Replaced ${item.versions.length}`,
+          loading: true
+      };
+
+      // Close replace UI, add pending version, keep original visible
       setResults(prev => {
           const next = [...prev];
           next[index] = { 
               ...next[index], 
-              replacementLoading: true,
-              statusText: "Replacing Subject..." 
+              isReplacing: false,
+              newSubjectImage: null,
+              pendingVersions: [...(next[index].pendingVersions || []), pendingVersion],
+              statusText: "替换中..."
           };
           return next;
       });
 
       try {
-          // Use current visible version as base? Or always use original?
-          // Let's use the *current visible version* as base if it exists, otherwise first version.
-          const currentVer = item.versions[item.currentVersionIndex];
-          if (!currentVer) throw new Error("No base image found");
-
           const genData = await replaceImageSubject(
               currentVer.url, 
               item.newSubjectImage, 
@@ -847,44 +869,41 @@ export default function Home() {
 
           if (!genData.result) throw new Error("No result from API");
 
-          // Update Result: Add new version and switch to it
+          // Success: Remove pending, add real version, switch to it
           setResults(prev => {
               const next = [...prev];
-              const item = next[index];
+              const updatedItem = next[index];
               
-              // Create deep copy of versions to ensure re-render
-              const newVersions = [
-                  ...item.versions, 
-                  { 
-                      url: genData.result!, 
-                      label: `Replaced ${item.versions.length}`, 
-                      timestamp: Date.now() 
-                  }
-              ];
+              const newVersion = { 
+                  url: genData.result!, 
+                  label: `Replaced ${updatedItem.versions.length}`, 
+                  timestamp: Date.now() 
+              };
 
               next[index] = {
-                  ...item,
-                  replacementLoading: false,
-                  statusText: "Subject Replaced",
-                  isReplacing: false,
-                  newSubjectImage: null,
-                  versions: newVersions,
-                  currentVersionIndex: newVersions.length - 1
+                  ...updatedItem,
+                  pendingVersions: updatedItem.pendingVersions.filter(p => p.id !== pendingId),
+                  versions: [...updatedItem.versions, newVersion],
+                  currentVersionIndex: updatedItem.versions.length, // Switch to new
+                  statusText: "替换完成"
               };
               
-              console.log("Updated Item:", next[index]); // Debug log
+              console.log("Updated Item:", next[index]);
               return next;
           });
 
       } catch (error: any) {
           console.error("Replace failed", error);
+          // Mark pending as error
           setResults(prev => {
               const next = [...prev];
+              const updatedItem = next[index];
               next[index] = { 
-                  ...next[index], 
-                  replacementLoading: false, 
-                  error: "Replace Failed",
-                  statusText: "Failed"
+                  ...updatedItem, 
+                  pendingVersions: updatedItem.pendingVersions.map(p => 
+                      p.id === pendingId ? { ...p, loading: false, error: "Failed" } : p
+                  ),
+                  statusText: "替换失败"
               };
               return next;
           });
@@ -908,7 +927,7 @@ export default function Home() {
       "/test-images/test4.jpg",
   ];
 
-  // Batch test: use all test images to replace subject on a single result card
+  // Batch test: use all test images to replace subject on a single result card (PARALLEL)
   const runBatchTest = async (index: number) => {
       const item = results[index];
       if (!item) return;
@@ -924,40 +943,36 @@ export default function Home() {
           return;
       }
 
-      // Set loading state
+      // Create pending versions for loading thumbnails
+      const pendingIds = TEST_IMAGES.map((_, i) => `test-${Date.now()}-${i}`);
+      const initialPendingVersions: PendingVersion[] = TEST_IMAGES.map((_, i) => ({
+          id: pendingIds[i],
+          label: `Test ${i + 1}`,
+          loading: true
+      }));
+
+      // Add pending versions to show loading thumbnails
       setResults(prev => {
           const next = [...prev];
           next[index] = { 
               ...next[index], 
-              replacementLoading: true,
-              statusText: `批量测试中... (0/${TEST_IMAGES.length})` 
+              pendingVersions: initialPendingVersions,
+              statusText: `批量测试中... (0/${TEST_IMAGES.length})`
           };
           return next;
       });
 
       let successCount = 0;
-      const newVersions: { url: string; label: string; timestamp: number }[] = [];
 
-      // Process test images sequentially to avoid rate limits
-      for (let i = 0; i < TEST_IMAGES.length; i++) {
-          const testImagePath = TEST_IMAGES[i];
+      // Process all test images in PARALLEL
+      const promises = TEST_IMAGES.map(async (testImagePath, i) => {
+          const pendingId = pendingIds[i];
           
           try {
-              // Update status
-              setResults(prev => {
-                  const next = [...prev];
-                  next[index] = { 
-                      ...next[index], 
-                      statusText: `批量测试中... (${i + 1}/${TEST_IMAGES.length})` 
-                  };
-                  return next;
-              });
-
               // Fetch test image and convert to base64
               const response = await fetch(testImagePath);
               if (!response.ok) {
-                  console.warn(`Test image not found: ${testImagePath}`);
-                  continue;
+                  throw new Error(`Test image not found: ${testImagePath}`);
               }
               const blob = await response.blob();
               const testImageBase64 = await new Promise<string>((resolve) => {
@@ -975,31 +990,59 @@ export default function Home() {
               );
 
               if (genData.result) {
-                  newVersions.push({
-                      url: genData.result,
-                      label: `Test ${i + 1}`,
-                      timestamp: Date.now()
+                  // Success: Remove pending, add real version
+                  setResults(prev => {
+                      const next = [...prev];
+                      const updatedItem = next[index];
+                      const newVersion = {
+                          url: genData.result!,
+                          label: `Test ${i + 1}`,
+                          timestamp: Date.now()
+                      };
+                      
+                      next[index] = {
+                          ...updatedItem,
+                          pendingVersions: updatedItem.pendingVersions.filter(p => p.id !== pendingId),
+                          versions: [...updatedItem.versions, newVersion],
+                          currentVersionIndex: updatedItem.versions.length, // Switch to new
+                          statusText: `测试中...`
+                      };
+                      return next;
                   });
                   successCount++;
+                  return true;
               }
+              throw new Error("No result");
           } catch (error) {
               console.error(`Test image ${i + 1} failed:`, error);
+              // Mark pending as error
+              setResults(prev => {
+                  const next = [...prev];
+                  const updatedItem = next[index];
+                  next[index] = {
+                      ...updatedItem,
+                      pendingVersions: updatedItem.pendingVersions.map(p => 
+                          p.id === pendingId ? { ...p, loading: false, error: "Failed" } : p
+                      )
+                  };
+                  return next;
+              });
+              return false;
           }
-      }
+      });
 
-      // Update result with all new versions
+      // Wait for all to complete
+      await Promise.all(promises);
+
+      // Final cleanup: remove any remaining pending versions and update status
       setResults(prev => {
           const next = [...prev];
           const updatedItem = next[index];
           
           next[index] = {
               ...updatedItem,
-              replacementLoading: false,
-              statusText: `测试完成 (${successCount}/${TEST_IMAGES.length})`,
-              versions: [...updatedItem.versions, ...newVersions],
-              currentVersionIndex: newVersions.length > 0 
-                  ? updatedItem.versions.length + newVersions.length - 1 
-                  : updatedItem.currentVersionIndex
+              pendingVersions: [], // Clear all pending
+              statusText: `测试完成 (${successCount}/${TEST_IMAGES.length})`
           };
           
           return next;
@@ -1320,9 +1363,9 @@ export default function Home() {
                             transition={{ delay: idx * 0.05, type: "spring", stiffness: 100 }}
                             className="bg-white dark:bg-neutral-800 rounded-3xl overflow-hidden shadow-xl hover:shadow-2xl transition-all duration-500 group border border-neutral-100 dark:border-neutral-700 flex flex-col"
                         >
-                            {/* Image Area */}
-                            <div className="h-[500px] bg-neutral-100 dark:bg-neutral-700/50 relative flex items-center justify-center overflow-hidden">
-                                {result.loading || result.replacementLoading ? (
+                            {/* Image Area - 3:4 aspect ratio */}
+                            <div className="aspect-[3/4] bg-neutral-100 dark:bg-neutral-700/50 relative flex items-center justify-center overflow-hidden">
+                                {result.loading ? (
                                     <div className="flex flex-col items-center gap-4 p-6 text-center">
                                         <div className="relative">
                                             <div className="w-16 h-16 border-4 border-violet-200 border-t-violet-600 rounded-full animate-spin"></div>
@@ -1428,7 +1471,7 @@ export default function Home() {
                                             </button>
                                             <button 
                                                 onClick={() => runBatchTest(idx)}
-                                                disabled={result.replacementLoading}
+                                                disabled={result.pendingVersions && result.pendingVersions.length > 0}
                                                 className="p-2 rounded-full text-neutral-400 hover:text-green-600 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-all disabled:opacity-50"
                                                 title="批量测试 (使用测试图片)"
                                             >
@@ -1457,15 +1500,16 @@ export default function Home() {
                                     )}
                                 </div>
 
-                                {/* Version Switcher (Thumbnails) */}
-                                {hasVersions && result.versions.length > 1 && (
+                                {/* Version Switcher (Thumbnails) - Show when multiple versions OR pending versions exist */}
+                                {(hasVersions && (result.versions.length > 1 || (result.pendingVersions && result.pendingVersions.length > 0))) && (
                                     <div className="flex gap-2 mb-4 overflow-x-auto py-2 scrollbar-none">
+                                        {/* Existing versions */}
                                         {result.versions.map((ver, vIdx) => (
                                             <div 
-                                                key={vIdx}
+                                                key={`ver-${vIdx}`}
                                                 onClick={() => toggleVersion(idx, vIdx)}
                                                 className={clsx(
-                                                    "w-12 h-12 rounded-lg border-2 overflow-hidden cursor-pointer flex-shrink-0 transition-all",
+                                                    "w-12 h-16 rounded-lg border-2 overflow-hidden cursor-pointer flex-shrink-0 transition-all",
                                                     result.currentVersionIndex === vIdx 
                                                         ? "border-violet-500 shadow-md scale-105" 
                                                         : "border-transparent opacity-60 hover:opacity-100 hover:border-neutral-300"
@@ -1473,6 +1517,25 @@ export default function Home() {
                                                 title={ver.label}
                                             >
                                                 <img src={ver.url} className="w-full h-full object-cover" alt={ver.label} />
+                                            </div>
+                                        ))}
+                                        {/* Pending versions (loading thumbnails) */}
+                                        {result.pendingVersions && result.pendingVersions.map((pending) => (
+                                            <div 
+                                                key={pending.id}
+                                                className={clsx(
+                                                    "w-12 h-16 rounded-lg border-2 overflow-hidden flex-shrink-0 flex items-center justify-center",
+                                                    pending.error 
+                                                        ? "border-red-300 bg-red-50 dark:bg-red-900/20" 
+                                                        : "border-violet-300 bg-violet-50 dark:bg-violet-900/20 animate-pulse"
+                                                )}
+                                                title={pending.error || pending.label}
+                                            >
+                                                {pending.loading ? (
+                                                    <Loader2 className="w-4 h-4 text-violet-500 animate-spin" />
+                                                ) : pending.error ? (
+                                                    <X className="w-4 h-4 text-red-500" />
+                                                ) : null}
                                             </div>
                                         ))}
                                     </div>
