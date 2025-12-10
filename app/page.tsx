@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Upload, Image as ImageIcon, Loader2, X, Plus, Settings, Lightbulb, Download, ZoomIn, Package, ToggleLeft, ToggleRight, RefreshCw, Edit3, FlaskConical, Sparkles } from "lucide-react";
+import { Upload, Image as ImageIcon, Loader2, X, Plus, Settings, Lightbulb, Download, ZoomIn, Package, ToggleLeft, ToggleRight, RefreshCw, Edit3, FlaskConical, Sparkles, RatioIcon } from "lucide-react";
 import clsx from "clsx";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
@@ -85,7 +85,7 @@ const analyzeImage = async (image: string, product: string, designTheme: string)
     return JSON.parse(jsonString.trim());
 };
 
-const generateImage = async (image: string, product: string, pattern_desc: string, scene_desc: string) => {
+const generateImage = async (image: string, product: string, pattern_desc: string, scene_desc: string, aspectRatio: string = "3:4") => {
     const client = getClient();
     const fullPrompt = `Design Pattern: ${pattern_desc}. High-end Scene Context: ${scene_desc}`;
 
@@ -98,7 +98,7 @@ const generateImage = async (image: string, product: string, pattern_desc: strin
       3. Reference Style: Mimic provided style if any.
       4. Subject Integration: Blend the subject seamlessly.
       5. Output: Clean, professional product shot.
-      6. Aspect Ratio: 3:4 (Portrait).
+      6. Aspect Ratio: ${aspectRatio}.
       7. Resolution: 2K (High Definition).
       8. RETURN ONLY THE URL.
     `;
@@ -146,7 +146,7 @@ const generateImage = async (image: string, product: string, pattern_desc: strin
     return { result: imageUrl };
 };
 
-const replaceImageSubject = async (originalImageUrl: string, newSubjectUrl: string, product: string, customPrompt?: string) => {
+const replaceImageSubject = async (originalImageUrl: string, newSubjectUrl: string, product: string, customPrompt?: string, aspectRatio: string = "3:4") => {
     const client = getClient();
     
     const systemInstruction = `
@@ -159,7 +159,7 @@ const replaceImageSubject = async (originalImageUrl: string, newSubjectUrl: stri
       3. 操作：将图1中 ${product} 上的主要图形/图案主体，替换为图2中的主体。
       4. 风格：新主体必须采用与图1中图案完全相同的艺术风格。
       5. 输出：一张逼真的商品摄影图，除了图案主体改变外，其他与图1完全一致。
-      6. 比例：3:4（竖版）。
+      6. 比例：${aspectRatio}。
       7. 分辨率：2K（高清）。
       8. 仅返回图片 URL。
     `;
@@ -209,7 +209,7 @@ const replaceImageSubject = async (originalImageUrl: string, newSubjectUrl: stri
 };
 
 // Replace subject AND adapt scene to match new subject
-const replaceImageSubjectWithScene = async (originalImageUrl: string, newSubjectUrl: string, product: string) => {
+const replaceImageSubjectWithScene = async (originalImageUrl: string, newSubjectUrl: string, product: string, aspectRatio: string = "3:4") => {
     const client = getClient();
     
     const systemInstruction = `
@@ -226,7 +226,7 @@ const replaceImageSubjectWithScene = async (originalImageUrl: string, newSubject
          - 场景要能突出主体特点，营造情感共鸣。
       5. 风格：新主体必须采用与图1中图案相似的艺术风格（如卡通、写实等）。
       6. 输出：一张逼真的商品摄影图，商品 ${product} 为主体，场景与新主体特点契合。
-      7. 比例：3:4（竖版）。
+      7. 比例：${aspectRatio}。
       8. 分辨率：2K（高清）。
       9. 仅返回图片 URL。
     `;
@@ -276,6 +276,21 @@ const replaceImageSubjectWithScene = async (originalImageUrl: string, newSubject
 
     return { result: imageUrl };
 };
+
+// Aspect Ratio options (aligned with Banana Pro)
+const ASPECT_RATIOS = [
+  { id: "1:1", label: "1:1 正方形", value: "1:1" },
+  { id: "3:4", label: "3:4 竖版", value: "3:4" },
+  { id: "4:3", label: "4:3 横版", value: "4:3" },
+  { id: "9:16", label: "9:16 手机竖屏", value: "9:16" },
+  { id: "16:9", label: "16:9 宽屏", value: "16:9" },
+  { id: "2:3", label: "2:3 竖版", value: "2:3" },
+  { id: "3:2", label: "3:2 横版", value: "3:2" },
+  { id: "4:5", label: "4:5 竖版", value: "4:5" },
+  { id: "5:4", label: "5:4 横版", value: "5:4" },
+];
+
+const DEFAULT_ASPECT_RATIO = "3:4";
 
 // Default products
 const DEFAULT_PRODUCTS = [
@@ -339,6 +354,7 @@ type GenerationResult = {
 export default function Home() {
   const [images, setImages] = useState<SubjectImage[]>([]);
   const [designTheme, setDesignTheme] = useState<string>(""); 
+  const [aspectRatio, setAspectRatio] = useState<string>(DEFAULT_ASPECT_RATIO);
   const [products, setProducts] = useState<ProductItem[]>(DEFAULT_PRODUCTS);
   const [status, setStatus] = useState<"idle" | "analyzing" | "generating" | "done">("idle");
   const [progressMessage, setProgressMessage] = useState<string>("");
@@ -386,6 +402,12 @@ export default function Home() {
           setDesignTheme(savedTheme);
       }
 
+      // Load aspect ratio
+      const savedAspectRatio = localStorage.getItem("leewow_aspect_ratio");
+      if (savedAspectRatio) {
+          setAspectRatio(savedAspectRatio);
+      }
+
       setIsLoaded(true); // Mark initialization as complete
   }, []);
 
@@ -402,6 +424,13 @@ export default function Home() {
           localStorage.setItem("leewow_design_theme", designTheme);
       }
   }, [designTheme, isLoaded]);
+
+  // Save aspect ratio to localStorage whenever it changes
+  useEffect(() => {
+      if (isLoaded) {
+          localStorage.setItem("leewow_aspect_ratio", aspectRatio);
+      }
+  }, [aspectRatio, isLoaded]);
 
     // Handle ESC key to close modal
     useEffect(() => {
@@ -679,7 +708,7 @@ export default function Home() {
 
                 try {
                     if (signal.aborted) throw new Error("Aborted");
-                    const genData = await generateImage(img.url, productName, pattern_desc, scene_desc);
+                    const genData = await generateImage(img.url, productName, pattern_desc, scene_desc, aspectRatio);
                     clearInterval(genTimer);
                     
                     updateItemState({
@@ -933,7 +962,8 @@ export default function Home() {
               currentVer.url, 
               item.newSubjectImage, 
               item.product,
-              item.replacePrompt
+              item.replacePrompt,
+              aspectRatio
           );
 
           if (!genData.result) throw new Error("No result from API");
@@ -1055,7 +1085,8 @@ export default function Home() {
                   currentVer.url,
                   testImageBase64,
                   item.product,
-                  item.replacePrompt
+                  item.replacePrompt,
+                  aspectRatio
               );
 
               if (genData.result) {
@@ -1182,7 +1213,8 @@ export default function Home() {
               const genData = await replaceImageSubjectWithScene(
                   currentVer.url,
                   testImageBase64,
-                  item.product
+                  item.product,
+                  aspectRatio
               );
 
               if (genData.result) {
@@ -1385,6 +1417,32 @@ export default function Home() {
                                 placeholder="例如：圣诞节、赛博朋克、中国风... (默认：时尚/有趣)"
                                 className="w-full bg-white dark:bg-neutral-800 rounded-xl px-4 py-3.5 outline-none border border-neutral-200 dark:border-neutral-600 focus:border-violet-500 focus:ring-2 focus:ring-violet-500/20 transition-all text-sm text-neutral-700 dark:text-neutral-200 placeholder-neutral-400"
                             />
+                        </div>
+
+                        {/* Aspect Ratio Selector */}
+                        <div className="bg-neutral-50 dark:bg-neutral-700/30 p-5 rounded-2xl border border-neutral-200 dark:border-neutral-600">
+                            <h3 className="text-lg font-semibold mb-3 flex items-center gap-2 text-neutral-700 dark:text-neutral-200">
+                                <RatioIcon className="w-5 h-5 text-cyan-500" /> 图片比例
+                            </h3>
+                            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+                                {ASPECT_RATIOS.map((ratio) => (
+                                    <button
+                                        key={ratio.id}
+                                        onClick={() => setAspectRatio(ratio.value)}
+                                        className={clsx(
+                                            "px-3 py-2.5 rounded-lg text-sm font-medium transition-all border",
+                                            aspectRatio === ratio.value
+                                                ? "bg-cyan-500 text-white border-cyan-500 shadow-md shadow-cyan-500/20"
+                                                : "bg-white dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 border-neutral-200 dark:border-neutral-600 hover:border-cyan-400 hover:text-cyan-500"
+                                        )}
+                                    >
+                                        {ratio.label}
+                                    </button>
+                                ))}
+                            </div>
+                            <p className="text-xs text-neutral-400 mt-3">
+                                💡 选择生成图片的宽高比例（与 Banana Pro 一致）
+                            </p>
                         </div>
 
                         {/* Target Products */}
