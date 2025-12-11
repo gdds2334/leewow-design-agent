@@ -85,6 +85,128 @@ const analyzeImage = async (image: string, product: string, designTheme: string)
     return JSON.parse(jsonString.trim());
 };
 
+// Analyze inspiration image + text description to generate prompt
+const analyzeInspirationImage = async (inspirationImage: string, textDescription: string, product: string) => {
+    const client = getClient();
+    const targetProduct = product || "Merchandise";
+
+    const prompt = `
+      你是一位专业的商品设计师和图案创意专家。
+      
+      任务：根据用户提供的灵感图和文字描述，为 "${targetProduct}" 设计一个独特的图案。
+      
+      用户的需求描述：
+      "${textDescription}"
+      
+      请分析灵感图，结合用户的文字描述，创作一个适合印在 "${targetProduct}" 上的图案设计方案。
+      
+      要求：
+      1. 从灵感图中提取关键视觉元素（色彩、风格、构图、氛围等）
+      2. 将用户的文字描述与灵感图的风格相结合
+      3. 设计应该适合 POD（Print on Demand）商品
+      4. 目标市场：北美市场
+      5. 如果图案包含文字，文字必须是英文
+      
+      返回 JSON 格式：
+      {
+        "inspiration_analysis": "对灵感图的简要分析（中文）",
+        "design_concept": "设计理念和创意说明（中文）",
+        "design": {
+            "product": "${targetProduct}",
+            "pattern_description": "详细的图案描述，用于生成图片（中文，但如果有文字则用英文）",
+            "scene_description": "商品摆放场景描述，高端、专业（中文）"
+        }
+      }
+    `;
+
+    const response = await client.chat.completions.create({
+      model: "gemini-2.5-pro-thinking", 
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: inspirationImage } },
+          ],
+        },
+      ],
+    });
+
+    const content = response.choices[0].message.content || "";
+    
+    let jsonString = content;
+    const jsonBlockMatch = content.match(/```json\n?([\s\S]*?)\n?```/);
+    if (jsonBlockMatch) {
+        jsonString = jsonBlockMatch[1];
+    } else {
+        const firstBrace = content.indexOf('{');
+        const lastBrace = content.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1) {
+            jsonString = content.substring(firstBrace, lastBrace + 1);
+        }
+    }
+    
+    return JSON.parse(jsonString.trim());
+};
+
+// Generate image from inspiration analysis (without subject image)
+const generateFromInspiration = async (pattern_desc: string, scene_desc: string, product: string, aspectRatio: string = "3:4") => {
+    const client = getClient();
+    const fullPrompt = `Design Pattern: ${pattern_desc}. High-end Scene Context: ${scene_desc}`;
+
+    const systemInstruction = `
+      You are an expert Product Designer for POD (Print on Demand) merchandise. 
+      Your goal is to generate a HIGH-QUALITY, COMMERCIAL-GRADE product mockup.
+      Rules:
+      1. Focus on the product: ${product || "Merchandise"}. The product must be the ABSOLUTE MAIN SUBJECT.
+      2. MINIMALIST COMPOSITION: Avoid clutter. The background should be simple, clean, and not distracting.
+      3. Create a unique, eye-catching design pattern based on the description.
+      4. Output: Clean, professional product shot.
+      5. Aspect Ratio: ${aspectRatio}.
+      6. Resolution: 2K (High Definition).
+      7. RETURN ONLY THE URL.
+    `;
+
+    const userPrompt = `
+      ${systemInstruction}
+      
+      Design Task: ${fullPrompt}. Create a photorealistic ${product || "product"} design.
+      
+      CRITICAL: Keep the scene CLEAN and UNCLUTTERED. The product should take up the majority of the frame and be clearly visible. Avoid excessive props or busy backgrounds.
+    `;
+
+    const response = await client.chat.completions.create({
+      model: "gemini-3-pro-image-preview",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: userPrompt },
+          ],
+        },
+      ],
+    });
+
+    const content = response.choices[0].message.content || "";
+    let imageUrl = null;
+      
+    const markdownMatch = content.match(/!\[.*?\]\((https?:\/\/.*?|data:image\/.*?)\)/);
+    const dataUriMatch = content.match(/(data:image\/[a-zA-Z]*;base64,[^\s)]+)/);
+    const urlMatch = content.match(/(https?:\/\/[^\s)]+)/);
+
+    if (markdownMatch) imageUrl = markdownMatch[1];
+    else if (dataUriMatch) imageUrl = dataUriMatch[1];
+    else if (urlMatch) imageUrl = urlMatch[1];
+    
+    if (imageUrl && !imageUrl.startsWith('data:')) {
+        imageUrl = imageUrl.replace(/[).,;]+$/, "").trim();
+    }
+
+    if (!imageUrl) throw new Error("No image URL found in response");
+
+    return { result: imageUrl };
+};
+
 const generateImage = async (image: string, product: string, pattern_desc: string, scene_desc: string, aspectRatio: string = "3:4") => {
     const client = getClient();
     const fullPrompt = `Design Pattern: ${pattern_desc}. High-end Scene Context: ${scene_desc}`;
@@ -362,8 +484,23 @@ export default function Home() {
   const [results, setResults] = useState<GenerationResult[]>([]);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   
+  // Inspiration Mode States
+  const [workMode, setWorkMode] = useState<"subject" | "inspiration">("subject");
+  const [inspirationImage, setInspirationImage] = useState<string | null>(null);
+  const [inspirationDescription, setInspirationDescription] = useState<string>("");
+  const [inspirationStatus, setInspirationStatus] = useState<"idle" | "analyzing" | "generating" | "done">("idle");
+  const [inspirationProgress, setInspirationProgress] = useState<string>("");
+  const [inspirationResults, setInspirationResults] = useState<{
+    analysis?: string;
+    concept?: string;
+    pattern_description?: string;
+    scene_description?: string;
+    generatedImages: { url: string; product: string }[];
+  } | null>(null);
+  
   const [isLoaded, setIsLoaded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const inspirationInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
   const [activeReplaceIndex, setActiveReplaceIndex] = useState<number | null>(null);
 
@@ -504,6 +641,89 @@ export default function Home() {
           e.preventDefault(); // Prevent default paste behavior
           await processFiles(files);
       }
+  };
+
+  // Handle inspiration image upload
+  const handleInspirationUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const resized = await resizeImage(file);
+      setInspirationImage(resized);
+    }
+    if (inspirationInputRef.current) inspirationInputRef.current.value = '';
+  };
+
+  // Generate from inspiration image + description
+  const handleInspirationGenerate = async () => {
+    if (!inspirationImage) {
+      alert("请先上传灵感图！");
+      return;
+    }
+    if (!inspirationDescription.trim()) {
+      alert("请输入图案描述！");
+      return;
+    }
+
+    const enabledProducts = products.filter(p => p.enabled);
+    if (enabledProducts.length === 0) {
+      alert("请至少启用一个商品！");
+      return;
+    }
+
+    setInspirationStatus("analyzing");
+    setInspirationProgress("正在分析灵感图...");
+    setInspirationResults(null);
+
+    try {
+      // Step 1: Analyze inspiration image for first product
+      const firstProduct = enabledProducts[0].name;
+      const analysisData = await analyzeInspirationImage(inspirationImage, inspirationDescription, firstProduct);
+      
+      const pattern_desc = analysisData.design?.pattern_description || "";
+      const scene_desc = analysisData.design?.scene_description || "";
+
+      setInspirationResults({
+        analysis: analysisData.inspiration_analysis,
+        concept: analysisData.design_concept,
+        pattern_description: pattern_desc,
+        scene_description: scene_desc,
+        generatedImages: []
+      });
+
+      setInspirationStatus("generating");
+      setInspirationProgress("正在生成商品图...");
+
+      // Step 2: Generate images for each enabled product
+      const generatedImages: { url: string; product: string }[] = [];
+      
+      for (let i = 0; i < enabledProducts.length; i++) {
+        const prod = enabledProducts[i];
+        setInspirationProgress(`正在生成 ${prod.name}... (${i + 1}/${enabledProducts.length})`);
+        
+        try {
+          const genData = await generateFromInspiration(pattern_desc, scene_desc, prod.name, aspectRatio);
+          if (genData.result) {
+            generatedImages.push({ url: genData.result, product: prod.name });
+            // Update results incrementally
+            setInspirationResults(prev => prev ? {
+              ...prev,
+              generatedImages: [...prev.generatedImages, { url: genData.result, product: prod.name }]
+            } : null);
+          }
+        } catch (err) {
+          console.error(`Failed to generate for ${prod.name}:`, err);
+        }
+      }
+
+      setInspirationStatus("done");
+      setInspirationProgress(`完成！成功生成 ${generatedImages.length} 张图片`);
+
+    } catch (error: any) {
+      console.error("Inspiration generation failed:", error);
+      setInspirationStatus("idle");
+      setInspirationProgress("");
+      alert("生成失败: " + (error.message || "未知错误"));
+    }
   };
 
   /*
@@ -1037,6 +1257,13 @@ export default function Home() {
           return;
       }
 
+      // Password check
+      const password = prompt("请输入密码以运行批量测试：");
+      if (password !== "326") {
+          alert("密码错误！");
+          return;
+      }
+
       // Confirm
       if (!confirm(`将使用 ${TEST_IMAGES.length} 张测试图片对该商品进行批量替换测试，是否继续？`)) {
           return;
@@ -1163,6 +1390,13 @@ export default function Home() {
       const currentVer = item.versions[item.currentVersionIndex];
       if (!currentVer) {
           alert("没有基准图片可供测试");
+          return;
+      }
+
+      // Password check
+      const password = prompt("请输入密码以运行场景测试：");
+      if (password !== "326") {
+          alert("密码错误！");
           return;
       }
 
@@ -1301,9 +1535,42 @@ export default function Home() {
           </h1>
         </header>
 
+        {/* Mode Switch */}
+        <section className="mb-8">
+          <div className="flex justify-center gap-4">
+            <button
+              onClick={() => setWorkMode("subject")}
+              className={clsx(
+                "px-6 py-3 rounded-xl font-semibold transition-all flex items-center gap-2",
+                workMode === "subject"
+                  ? "bg-violet-600 text-white shadow-lg shadow-violet-500/30"
+                  : "bg-white dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 border border-neutral-200 dark:border-neutral-600 hover:border-violet-400"
+              )}
+            >
+              <Upload className="w-5 h-5" />
+              主体图模式
+            </button>
+            <button
+              onClick={() => setWorkMode("inspiration")}
+              className={clsx(
+                "px-6 py-3 rounded-xl font-semibold transition-all flex items-center gap-2",
+                workMode === "inspiration"
+                  ? "bg-gradient-to-r from-pink-500 to-orange-500 text-white shadow-lg shadow-pink-500/30"
+                  : "bg-white dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 border border-neutral-200 dark:border-neutral-600 hover:border-pink-400"
+              )}
+            >
+              <Sparkles className="w-5 h-5" />
+              灵感图模式
+            </button>
+          </div>
+        </section>
+
         {/* Upload Section */}
         <section className="mb-16">
           <div className="bg-white dark:bg-neutral-800 rounded-3xl shadow-2xl p-8 md:p-10 border border-neutral-100 dark:border-neutral-700 backdrop-blur-sm bg-opacity-80 dark:bg-opacity-80 transition-all hover:shadow-3xl duration-500">
+            
+            {/* Subject Mode */}
+            {workMode === "subject" && (
             <div className="flex flex-col gap-10">
                 <div className="flex flex-col lg:flex-row gap-10">
                     {/* Main Image Upload (Multiple) */}
@@ -1540,6 +1807,207 @@ export default function Home() {
                     </div>
                 </div>
             </div>
+            )}
+
+            {/* Inspiration Mode */}
+            {workMode === "inspiration" && (
+            <div className="flex flex-col gap-8">
+                <div className="flex flex-col lg:flex-row gap-8">
+                    {/* Inspiration Image Upload */}
+                    <div 
+                        onClick={() => inspirationInputRef.current?.click()}
+                        className={clsx(
+                            "w-full lg:w-5/12 h-80 md:h-96 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all duration-300 relative overflow-hidden group",
+                            inspirationImage ? "border-pink-500 bg-pink-50 dark:bg-pink-900/10" : "border-neutral-300 hover:border-pink-400 hover:bg-pink-50/50 dark:border-neutral-600 dark:hover:bg-pink-900/10"
+                        )}
+                    >
+                        {inspirationImage ? (
+                            <div className="w-full h-full p-4 flex flex-col items-center justify-center gap-4">
+                                <img src={inspirationImage} alt="Inspiration" className="max-h-60 rounded-xl object-contain shadow-lg" />
+                                <p className="text-sm font-medium text-pink-600">灵感图已上传</p>
+                                <button 
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setInspirationImage(null);
+                                    }}
+                                    className="text-xs text-neutral-400 hover:text-red-500 transition-colors"
+                                >
+                                    点击重新上传
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="flex flex-col items-center gap-4 text-neutral-400 group-hover:text-pink-500 transition-colors">
+                                <div className="p-4 rounded-full bg-neutral-100 dark:bg-neutral-700 group-hover:bg-pink-50 dark:group-hover:bg-pink-900/20 transition-colors">
+                                    <Sparkles className="w-8 h-8" />
+                                </div>
+                                <p className="text-lg font-medium">上传灵感图</p>
+                                <p className="text-sm opacity-70">参考图片、风格图、素材等</p>
+                            </div>
+                        )}
+                        <input 
+                            type="file" 
+                            ref={inspirationInputRef} 
+                            onChange={handleInspirationUpload} 
+                            className="hidden" 
+                            accept="image/*"
+                        />
+                    </div>
+
+                    {/* Description & Settings */}
+                    <div className="flex-1 space-y-6">
+                        {/* Text Description */}
+                        <div className="bg-gradient-to-br from-pink-50 to-orange-50 dark:from-pink-900/20 dark:to-orange-900/20 p-5 rounded-2xl border border-pink-200 dark:border-pink-700">
+                            <h3 className="text-lg font-semibold mb-3 flex items-center gap-2 text-neutral-700 dark:text-neutral-200">
+                                <Edit3 className="w-5 h-5 text-pink-500" /> 图案描述
+                            </h3>
+                            <textarea
+                                value={inspirationDescription}
+                                onChange={(e) => setInspirationDescription(e.target.value)}
+                                placeholder="描述你想要的图案效果，例如：&#10;• 把灵感图中的猫咪画成宇航员风格&#10;• 提取灵感图的配色做成极简线条&#10;• 参考这个风格设计一个咖啡主题图案"
+                                className="w-full bg-white dark:bg-neutral-800 rounded-xl px-4 py-3.5 outline-none border border-pink-200 dark:border-pink-700 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 transition-all text-sm text-neutral-700 dark:text-neutral-200 placeholder-neutral-400 min-h-[120px] resize-y"
+                            />
+                        </div>
+
+                        {/* Aspect Ratio for Inspiration */}
+                        <div className="bg-neutral-50 dark:bg-neutral-700/30 p-5 rounded-2xl border border-neutral-200 dark:border-neutral-600">
+                            <h3 className="text-lg font-semibold mb-3 flex items-center gap-2 text-neutral-700 dark:text-neutral-200">
+                                <RatioIcon className="w-5 h-5 text-cyan-500" /> 图片比例
+                            </h3>
+                            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+                                {ASPECT_RATIOS.map((ratio) => (
+                                    <button
+                                        key={ratio.id}
+                                        onClick={() => setAspectRatio(ratio.value)}
+                                        className={clsx(
+                                            "px-3 py-2.5 rounded-lg text-sm font-medium transition-all border",
+                                            aspectRatio === ratio.value
+                                                ? "bg-cyan-500 text-white border-cyan-500 shadow-md shadow-cyan-500/20"
+                                                : "bg-white dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 border-neutral-200 dark:border-neutral-600 hover:border-cyan-400 hover:text-cyan-500"
+                                        )}
+                                    >
+                                        {ratio.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Target Products for Inspiration */}
+                        <div>
+                            <h3 className="text-lg font-semibold mb-4 flex items-center gap-2 text-neutral-700 dark:text-neutral-200">
+                                <Package className="w-5 h-5 text-violet-500" /> 目标商品
+                            </h3>
+                            <div className="flex flex-wrap gap-2">
+                                {products.map((prod, idx) => (
+                                    <button
+                                        key={prod.id}
+                                        onClick={() => toggleProduct(idx)}
+                                        className={clsx(
+                                            "px-4 py-2 rounded-full text-sm font-medium transition-all border",
+                                            prod.enabled
+                                                ? "bg-violet-500 text-white border-violet-500"
+                                                : "bg-white dark:bg-neutral-800 text-neutral-500 border-neutral-200 dark:border-neutral-600"
+                                        )}
+                                    >
+                                        {prod.name}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Status Message */}
+                        {inspirationStatus !== "idle" && inspirationStatus !== "done" && (
+                            <div className="space-y-3">
+                                <div className="flex items-center gap-3 text-pink-600">
+                                    <Loader2 className="animate-spin w-5 h-5" />
+                                    <span className="text-sm font-medium">{inspirationProgress}</span>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Generate Button */}
+                        <button
+                            onClick={handleInspirationGenerate}
+                            disabled={!inspirationImage || !inspirationDescription.trim() || inspirationStatus === "analyzing" || inspirationStatus === "generating"}
+                            className="w-full bg-gradient-to-r from-pink-500 to-orange-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-pink-500/30 transform transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none flex items-center justify-center gap-3 text-lg"
+                        >
+                            {inspirationStatus === "analyzing" || inspirationStatus === "generating" ? (
+                                <>
+                                    <Loader2 className="animate-spin w-6 h-6" />
+                                    <span>{inspirationProgress}</span>
+                                </>
+                            ) : (
+                                <>
+                                    <Sparkles className="w-6 h-6" />
+                                    生成创意设计
+                                </>
+                            )}
+                        </button>
+                    </div>
+                </div>
+
+                {/* Inspiration Results */}
+                {inspirationResults && (
+                    <div className="mt-8 space-y-6">
+                        {/* Analysis Info */}
+                        {(inspirationResults.analysis || inspirationResults.concept) && (
+                            <div className="bg-gradient-to-br from-pink-50 to-orange-50 dark:from-pink-900/20 dark:to-orange-900/20 p-6 rounded-2xl border border-pink-200 dark:border-pink-700">
+                                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2 text-neutral-700 dark:text-neutral-200">
+                                    <Lightbulb className="w-5 h-5 text-pink-500" /> AI 分析结果
+                                </h3>
+                                {inspirationResults.analysis && (
+                                    <div className="mb-3">
+                                        <p className="text-sm text-neutral-500 mb-1">灵感图分析：</p>
+                                        <p className="text-sm text-neutral-700 dark:text-neutral-300">{inspirationResults.analysis}</p>
+                                    </div>
+                                )}
+                                {inspirationResults.concept && (
+                                    <div>
+                                        <p className="text-sm text-neutral-500 mb-1">设计理念：</p>
+                                        <p className="text-sm text-neutral-700 dark:text-neutral-300">{inspirationResults.concept}</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Generated Images */}
+                        {inspirationResults.generatedImages.length > 0 && (
+                            <div>
+                                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2 text-neutral-700 dark:text-neutral-200">
+                                    <ImageIcon className="w-5 h-5 text-pink-500" /> 生成结果
+                                </h3>
+                                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                                    {inspirationResults.generatedImages.map((img, idx) => (
+                                        <div key={idx} className="relative group rounded-xl overflow-hidden border border-neutral-200 dark:border-neutral-600 shadow-lg">
+                                            <img 
+                                                src={img.url} 
+                                                alt={img.product} 
+                                                className="w-full aspect-[3/4] object-cover cursor-pointer hover:scale-105 transition-transform"
+                                                onClick={() => setSelectedImage(img.url)}
+                                            />
+                                            <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-3">
+                                                <p className="text-white text-sm font-medium">{img.product}</p>
+                                            </div>
+                                            <button
+                                                onClick={() => {
+                                                    const link = document.createElement('a');
+                                                    link.href = img.url;
+                                                    link.download = `${img.product}-design.png`;
+                                                    link.click();
+                                                }}
+                                                className="absolute top-2 right-2 bg-white/90 hover:bg-white p-2 rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
+                                            >
+                                                <Download className="w-4 h-4 text-neutral-700" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+            )}
+
           </div>
         </section>
 
